@@ -10,7 +10,7 @@ from datetime import date
 from ctypes import wintypes
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import Qt, QTimer, QDate, QRect, QSize, QPoint, QEvent, QObject, Signal
+from PySide6.QtCore import Qt, QTimer, QDate, QRect, QRectF, QSize, QPoint, QEvent, QObject, Signal
 from PySide6.QtGui import (QColor, QFont, QGuiApplication, QImage, QImageReader, QKeySequence, QPainter,
                            QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCalendarWidget, QCheckBox, QDialog, QFrame,
@@ -363,6 +363,17 @@ class HolidayCalendar(QCalendarWidget):
         painter.restore()
 
 
+class _CalendarPicker(QFrame):
+    """年/月选择面板：显式绘制实色底，透明只保留在圆角外部。"""
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor(C.UI_POPUP_BG))
+        painter.setPen(QPen(QColor(255, 255, 255, 18), 1))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(.5, .5, -.5, -.5), 8, 8)
+
+
 class CalendarWindow(QWidget):
     """R90 重设计：无边框半透插件壳，与任务清单同一语言——自绘阴影卡片（令牌色）、
     徽章标题栏（兼拖动把手）、钉置顶（默认钉：兼容原置顶工具窗行为）、×/Esc 关闭。
@@ -572,7 +583,7 @@ class CalendarWindow(QWidget):
         self._sync_pin_icon(on)
 
     def _new_calendar_picker(self):
-        popup = QFrame(self, Qt.Popup | Qt.FramelessWindowHint)
+        popup = _CalendarPicker(self, Qt.Popup | Qt.FramelessWindowHint)
         popup.setObjectName("calPicker")
         popup.setAttribute(Qt.WA_TranslucentBackground, True)  # 仅供圆角外轮廓透明；面板内容使用实色底
         popup.setStyleSheet("""

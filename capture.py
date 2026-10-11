@@ -633,65 +633,11 @@ class ShotOverlay(QWidget):
         pos = self._color_pos
         if not self.rect().contains(pos) or self.base_img.isNull():
             return
-        cells, cell, info = 11, 16, 60
-        mag = cells * cell
-        w, h = mag, mag + info
-        x, y = pos.x() + 22, pos.y() + 22
-        if x + w > self.width() - 8:
-            x = pos.x() - w - 22
-        if y + h > self.height() - 8:
-            y = pos.y() - h - 22
-        rc = QRect(max(8, x), max(8, y), w, h)
-        cx = max(0, min(self.base_img.width() - 1, round(pos.x() * self.k)))
-        cy = max(0, min(self.base_img.height() - 1, round(pos.y() * self.k)))
-        src = QRect(cx - cells // 2, cy - cells // 2, cells, cells).intersected(self.base_img.rect())
-        p.save()
-        border = QColor(C.UI_TASK_CONTROL)
-        border.setAlpha(65)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(C.UI_BG_CARD))
-        p.drawRoundedRect(rc, C.UI_RADIUS, C.UI_RADIUS)
-        mx, my = rc.x(), rc.y()
-        crop = self.base_img.copy(src)
-        crop.setDevicePixelRatio(1.0)
-        crop = crop.scaled(src.width() * cell, src.height() * cell,
-                           Qt.IgnoreAspectRatio, Qt.FastTransformation)
-        p.save()
-        shell = QPainterPath()
-        shell.addRoundedRect(QRectF(rc), C.UI_RADIUS, C.UI_RADIUS)
-        preview = QPainterPath()
-        preview.addRect(QRectF(mx, my, mag, mag))
-        p.setClipPath(shell.intersected(preview))
-        p.drawImage(QPoint(mx + (src.x() - (cx - cells // 2)) * cell,
-                          my + (src.y() - (cy - cells // 2)) * cell), crop)
-        mk = QRect(mx + (cells // 2) * cell, my + (cells // 2) * cell, cell, cell)
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(C.UI_BG_CARD), 3))
-        p.drawRect(mk)
-        p.setPen(QPen(QColor(C.UI_TASK_TEXT), 1))
-        p.drawRect(mk)
-        p.restore()
-        color = self._selection_color(pos)
-        p.setPen(QPen(QColor(C.UI_TASK_TEXT), 1))
-        p.setBrush(color)
-        p.drawRoundedRect(QRect(rc.x() + 12, my + mag + 10, 14, 14), 3, 3)
-        font = QFont("Microsoft YaHei UI")
-        font.setPixelSize(12)
-        p.setFont(font)
-        p.setPen(QColor(C.UI_TEXT))
-        text = color.name().upper()
-        if time.monotonic() < self._color_copied_until and text == self._color_copied_hex:
-            text = "已复制 " + text
-        p.drawText(QRect(rc.x() + 34, my + mag + 8, w - 40, 18), Qt.AlignVCenter, text)
-        font.setPixelSize(11)
-        p.setFont(font)
-        p.setPen(QColor(C.UI_TEXT2))
-        p.drawText(QRect(rc.x() + 12, rc.bottom() - 20, w - 24, 16), Qt.AlignCenter,
-                   "Ctrl+C 复制色值 · 右键取消")
-        p.setPen(QPen(border, 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(QRectF(rc).adjusted(0.5, 0.5, -0.5, -0.5), C.UI_RADIUS, C.UI_RADIUS)
-        p.restore()
+        copied = self._color_copied_hex if time.monotonic() < self._color_copied_until else ""
+        _ColorPickerCard.draw(
+            p, self.base_img, self.k, pos,
+            _ColorPickerCard.rect(pos, self.width(), self.height()),
+            hint="Ctrl+C 复制 · 右键 / Esc 取消", copied_hex=copied)
 
     def paintEvent(self, ev):
         p = QPainter(self)
@@ -3027,6 +2973,97 @@ class RegionFrame(QWidget):
         p.end()
 
 
+class _ColorPickerCard:
+    """截图框选与独立取色共用的放大镜卡片。"""
+
+    CELLS = 15
+    MAG = 180
+    INFO = 96
+    GAP = 22
+
+    @classmethod
+    def rect(cls, pos, width, height):
+        total = cls.MAG + cls.INFO
+        x, y = pos.x() + cls.GAP, pos.y() + cls.GAP
+        if x + cls.MAG > width - 8:
+            x = pos.x() - cls.GAP - cls.MAG
+        if y + total > height - 8:
+            y = pos.y() - cls.GAP - total
+        return QRect(max(8, x), max(8, y), cls.MAG, total)
+
+    @classmethod
+    def draw(cls, p, image, scale, pos, rc,
+             hint="左键 复制  ·  右键 / Esc 取消", copied_hex=""):
+        if image.isNull():
+            return
+        mag = QRect(rc.x(), rc.y(), cls.MAG, cls.MAG)
+        half, cell = cls.CELLS // 2, cls.MAG // cls.CELLS
+        cx = min(image.width() - 1, max(0, round(pos.x() * scale)))
+        cy = min(image.height() - 1, max(0, round(pos.y() * scale)))
+        src = QRect(cx - half, cy - half, cls.CELLS, cls.CELLS).intersected(image.rect())
+        p.save()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(16, 20, 30, 236))
+        p.drawRoundedRect(rc, C.UI_RADIUS, C.UI_RADIUS)
+        crop = image.copy(src)
+        crop.setDevicePixelRatio(1.0)
+        crop = crop.scaled(src.width() * cell, src.height() * cell,
+                           Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        p.save()
+        shell = QPainterPath()
+        shell.addRoundedRect(QRectF(rc), C.UI_RADIUS, C.UI_RADIUS)
+        preview = QPainterPath()
+        preview.addRect(QRectF(mag))
+        p.setClipPath(shell.intersected(preview))
+        p.drawImage(QPoint(mag.x() + (src.x() - (cx - half)) * cell,
+                           mag.y() + (src.y() - (cy - half)) * cell), crop)
+        p.setPen(QPen(QColor(255, 255, 255, 26), 1))
+        for i in range(1, cls.CELLS):
+            p.drawLine(mag.x() + i * cell, mag.y(), mag.x() + i * cell, mag.y() + cls.MAG)
+            p.drawLine(mag.x(), mag.y() + i * cell, mag.x() + cls.MAG, mag.y() + i * cell)
+        # 边缘只裁掉缺失像素，取样格始终位于放大区中央。
+        sample = QRect(mag.x() + half * cell, mag.y() + half * cell, cell, cell)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(10, 12, 20, 200), 3))
+        p.drawRect(sample.adjusted(-1, -1, 0, 0))
+        p.setPen(QPen(QColor(255, 255, 255, 240), 1.4))
+        p.drawRect(sample.adjusted(-1, -1, 0, 0))
+        p.restore()
+        p.setPen(QPen(QColor(255, 255, 255, 18), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(rc).adjusted(.5, .5, -.5, -.5), C.UI_RADIUS, C.UI_RADIUS)
+        iy = rc.y() + cls.MAG
+        lx, rx = rc.x() + 12, rc.right() - 12
+        cur = image.pixelColor(cx, cy)
+        chip = QRect(lx, iy + 12, 22, 22)
+        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        p.setBrush(cur)
+        p.drawRoundedRect(chip, 6, 6)
+        font = QFont("Microsoft YaHei UI")
+        font.setPixelSize(14)
+        font.setWeight(QFont.Bold)
+        p.setFont(font)
+        p.setPen(QColor(C.UI_TEXT))
+        p.drawText(QRect(chip.right() + 11, chip.y(), rx - chip.right() - 11, chip.height()),
+                   Qt.AlignLeft | Qt.AlignVCenter, cur.name().upper())
+        font.setPixelSize(11)
+        font.setWeight(QFont.Normal)
+        p.setFont(font)
+        rgb = QRect(lx, iy + 42, rx - lx, 16)
+        p.setPen(QColor(C.UI_TEXT3))
+        p.drawText(rgb, Qt.AlignLeft | Qt.AlignVCenter, "RGB")
+        p.setPen(QColor(C.UI_TEXT2))
+        p.drawText(rgb, Qt.AlignRight | Qt.AlignVCenter,
+                   f"{cur.red()} · {cur.green()} · {cur.blue()}")
+        p.setPen(QPen(QColor(255, 255, 255, 12), 1))
+        p.drawLine(lx, iy + 66, rx, iy + 66)
+        copied = bool(copied_hex) and copied_hex == cur.name().upper()
+        p.setPen(QColor(C.UI_BADGE_FROM if copied else C.UI_TEXT3))
+        p.drawText(QRect(lx, iy + 73, rx - lx, 16), Qt.AlignLeft | Qt.AlignVCenter,
+                   "已复制到剪贴板" if copied else hint)
+        p.restore()
+
+
 class ColorPickerOverlay(QWidget):
     """R103 屏幕取色器：冻结屏 + 放大镜逐像素取色。
     左键＝取准星处色值 emit picked("#rrggbb")；右键/Esc/外部关窗＝取消 emit picked("")。
@@ -3036,10 +3073,10 @@ class ColorPickerOverlay(QWidget):
     Windows 仍把鼠标消息投给覆盖层，但 Qt 平台层用 ChildWindowFromPointEx 找不到自身窗口，
     会丢弃全部无按键 WM_MOUSEMOVE（点击/键盘不受影响）→ 放大镜定格、看似卡死。"""
 
-    CELLS = 15                                   # 放大镜网格数（奇数：中心格即取样像素）
-    MAG = 180                                    # 放大区边长（逻辑像素）
-    INFO = 96                                    # 读数区高度（色块+HEX / RGB / 分隔线 / 提示，R115 三行阶梯）
-    GAP = 22                                     # 与光标的间距
+    CELLS = _ColorPickerCard.CELLS
+    MAG = _ColorPickerCard.MAG
+    INFO = _ColorPickerCard.INFO
+    GAP = _ColorPickerCard.GAP
     TRACK_MS = 16                                # R114 光标轮询周期（≈60fps）
 
     picked = Signal(str)
@@ -3085,15 +3122,8 @@ class ColorPickerOverlay(QWidget):
         return self._img.pixelColor(dx, dy).name()
 
     def _mag_rect(self, pos):
-        """放大镜卡片位：默认光标右下，贴右/下沿翻向左上（全程钳在屏内）。"""
-        total = self.MAG + self.INFO
-        x = pos.x() + self.GAP
-        y = pos.y() + self.GAP
-        if x + self.MAG > self.width() - 8:
-            x = pos.x() - self.GAP - self.MAG
-        if y + total > self.height() - 8:
-            y = pos.y() - self.GAP - total
-        return QRect(max(8, x), max(8, y), self.MAG, total)
+        """与截图框选共用卡片尺寸、跟随间距和贴边翻转。"""
+        return _ColorPickerCard.rect(pos, self.width(), self.height())
 
     def _set_pos(self, pos):
         """准星落点唯一入口：钳屏内 → 取样 → 变了才重绘。"""
@@ -3127,71 +3157,7 @@ class ColorPickerOverlay(QWidget):
         p.setPen(QPen(QColor(255, 255, 255, 230), 1))
         p.drawLine(pos.x() - 9, pos.y(), pos.x() + 9, pos.y())
         p.drawLine(pos.x(), pos.y() - 9, pos.x(), pos.y() + 9)
-        # ---- 放大镜卡片 ----
-        rc = self._mag_rect(pos)
-        mag = QRect(rc.x(), rc.y(), self.MAG, self.MAG)
-        half, cell = self.CELLS // 2, self.MAG // self.CELLS
-        cx = min(self._img.width() - 1, max(0, round(pos.x() * self.k)))
-        cy = min(self._img.height() - 1, max(0, round(pos.y() * self.k)))
-        src = QRect(cx - half, cy - half, self.CELLS, self.CELLS).intersected(self._img.rect())
-        p.setPen(Qt.NoPen)
-        # 卡片底＝壳色 rgba(16,20,30) 提至 236 不透（R115：冻结帧底色任意，读数可读性优先于 78% 透感）
-        p.setBrush(QColor(16, 20, 30, 236))
-        p.drawRoundedRect(rc, C.UI_RADIUS, C.UI_RADIUS)      # 卡片底（含放大区与读数区）
-        crop = self._img.copy(src)
-        crop = crop.scaled(src.width() * cell, src.height() * cell,
-                           Qt.IgnoreAspectRatio, Qt.FastTransformation)   # 最近邻＝像素块锐利
-        p.save()
-        shell = QPainterPath()
-        shell.addRoundedRect(QRectF(rc), C.UI_RADIUS, C.UI_RADIUS)
-        magp = QPainterPath()
-        magp.addRect(QRectF(mag))
-        p.setClipPath(shell.intersected(magp))   # 网格收进放大区内，且上两角随卡片圆角（不再方角外溢）
-        p.drawImage(QPoint(mag.x() + (src.x() - (cx - half)) * cell,
-                           mag.y() + (src.y() - (cy - half)) * cell), crop)
-        p.setPen(QPen(QColor(255, 255, 255, 26), 1))     # 像素网格
-        for i in range(1, self.CELLS):
-            p.drawLine(mag.x() + i * cell, mag.y(), mag.x() + i * cell, mag.y() + self.MAG)
-            p.drawLine(mag.x(), mag.y() + i * cell, mag.x() + self.MAG, mag.y() + i * cell)
-        mk = QRect(mag.x() + (cx - src.x()) * cell, mag.y() + (cy - src.y()) * cell, cell, cell)
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(10, 12, 20, 200), 3))
-        p.drawRect(mk.adjusted(-1, -1, 0, 0))    # 中心取样格：深描边 + 白框
-        p.setPen(QPen(QColor(255, 255, 255, 240), 1.4))
-        p.drawRect(mk.adjusted(-1, -1, 0, 0))
-        p.restore()
-        p.setPen(QPen(QColor(255, 255, 255, 18), 1))     # 卡片描边（UI_BORDER）
-        p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(QRectF(rc).adjusted(0.5, 0.5, -0.5, -0.5), C.UI_RADIUS, C.UI_RADIUS)
-        # ---- 读数区（R115 对表 MASTER 字体阶梯）：色块+HEX 14px/700 · RGB 11px 次文本 · 细分隔 · 提示 11px 弱文本 ----
-        iy = rc.y() + self.MAG
-        lx, rx = rc.x() + 12, rc.right() - 12
-        cur = self._img.pixelColor(cx, cy)
-        chip = QRect(lx, iy + 12, 22, 22)
-        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
-        p.setBrush(cur)
-        p.drawRoundedRect(chip, 6, 6)
-        f = QFont("Microsoft YaHei UI")
-        f.setPixelSize(14)
-        f.setWeight(QFont.Bold)
-        p.setFont(f)
-        p.setPen(QColor(C.UI_TEXT))
-        p.drawText(QRect(chip.right() + 11, chip.y(), rx - chip.right() - 11, chip.height()),
-                   Qt.AlignLeft | Qt.AlignVCenter, cur.name().upper())
-        f.setPixelSize(11)
-        f.setWeight(QFont.Normal)
-        p.setFont(f)
-        row2 = QRect(lx, iy + 42, rx - lx, 16)
-        p.setPen(QColor(C.UI_TEXT3))
-        p.drawText(row2, Qt.AlignLeft | Qt.AlignVCenter, "RGB")
-        p.setPen(QColor(C.UI_TEXT2))
-        p.drawText(row2, Qt.AlignRight | Qt.AlignVCenter,
-                   f"{cur.red()} · {cur.green()} · {cur.blue()}")
-        p.setPen(QPen(QColor(255, 255, 255, 12), 1))           # 分隔线（色板：rgba 9~14）
-        p.drawLine(lx, iy + 66, rx, iy + 66)
-        p.setPen(QColor(C.UI_TEXT3))
-        p.drawText(QRect(lx, iy + 73, rx - lx, 16), Qt.AlignLeft | Qt.AlignVCenter,
-                   "左键 复制  ·  右键 / Esc 取消")
+        _ColorPickerCard.draw(p, self._img, self.k, pos, self._mag_rect(pos))
         p.end()
 
     # ---------- 交互 ----------
