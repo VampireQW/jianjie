@@ -1,0 +1,39 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Generated packages, native toolchain and runtime observations
+/build/
+/dist/
+/_build*/
+/_dist*/
+/_jj_snap*/
+/_test_state*/
+/native/*.dll
+/native/*.obj
+/native/*.lib
+/native/*.pdb
+*.log
+
+# Local credentials and application data
+.env
+.env.*
+!.env.example
+.wrangler/
+*.db
+*.db-wal
+*.db-shm
+settings.json
+tasks.json
+storage-locations.json
+
+# Local diagnostic artifacts
+/_*.py
+/_*.ps1
+/_*.mp4
+/_*.png
+/.idea/
+/.vscode/
