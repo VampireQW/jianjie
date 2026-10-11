@@ -59,7 +59,7 @@
 
 适用于 **Windows 10 / 11，64 位**。
 
-1. 从 [Releases](https://github.com/VampireQW/jianjie/releases/latest) 下载 `简截.exe`，放在准备长期使用的文件夹中。
+1. 从 [Releases](https://github.com/VampireQW/jianjie/releases/latest) 下载 `JianJie.exe`（简截完整版），放在准备长期使用的文件夹中。
 2. 双击运行，无需安装 Python。
 3. 从主面板点击功能，或使用全局快捷键直接触发。
 4. 点击右上角齿轮，修改快捷键、提示位置、开机自启动和截图指针。
