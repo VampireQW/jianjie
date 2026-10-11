@@ -1348,7 +1348,7 @@ class PhoneReceiveDialog(CardDialog):
         first_step.itemAt(1).layout().addLayout(link_row)
         instructions.addLayout(first_step)
         instructions.addLayout(self._step("2", "填入下方连接信息", "将下方三项复制到配置页；User 对应 Username。若添加按钮无响应，先点“跳过设置”添加，再进入编辑页填写。"))
-        instructions.addLayout(self._step("3", "添加一次，从分享菜单发送", f"照片或文件 → 分享 → {SHORTCUT_NAME}。复制文字后也可运行快捷指令上传；接收电脑内容请使用“扫码互传”。"))
+        instructions.addLayout(self._step("3", "获取或发送，一次配置", f"单独运行 {SHORTCUT_NAME}，选择“获取”接收电脑发送的内容，选择“发送”上传手机剪贴板。照片或文件也可从分享菜单发送。"))
         instructions.addWidget(self._label(f"当前快捷指令：{SHORTCUT_NAME}", "phoneHint"))
         instructions.addStretch()
         self.phone_pages = QStackedWidget(page)
@@ -1492,7 +1492,7 @@ class PhoneReceiveDialog(CardDialog):
         self.android_button.setAccessibleDescription("已选择" if index == 1 else "未选择")
         common = "手机连接不上：确认同一局域网和 URL 地址；仍失败或换过端口时，可修复局域网连接。"
         from phone_receive import SHORTCUT_NAME
-        ios = f"微信无法打开：复制链接到 Safari，再点“获取快捷指令”。\n已添加过：打开 {SHORTCUT_NAME} 编辑页，更新 URL、Username 和 Password。\n分享后无反应：顶部接收类型勾选图像、文件、文本；在最后一个上传请求后添加“快速查看”展示返回值。电脑收到请求后会在这里显示处理结果。\n快捷指令用于手机快捷发送；接收电脑内容使用扫码网页。\nHEIC 等格式按文件接收，可在资源管理器粘贴保存。"
+        ios = f"微信无法打开：复制链接到 Safari，再点“获取快捷指令”。\n使用新版：添加 {SHORTCUT_NAME}，将 URL、Username 和 Password 配置为下方连接信息。\n单独运行：选择“获取”接收电脑发送的内容，选择“发送”上传手机剪贴板。\n分享照片或文件：在分享菜单中选择此快捷指令。电脑收到请求后会在这里显示处理结果。\nHEIC 等格式按文件接收，可在资源管理器粘贴保存。"
         android = "无需安装 App：扫码即可收发，无需填写账号密码。Mac / Windows / iPhone / 安卓均可使用。\n微信不能选图：用常用浏览器打开；必要时复制配对链接。\n图片最大 32 MiB；其他文件最大 2 GiB，可通过“选择文件”发送 HEIC / WebP 原文件。\n最近 5 条临时保留 30 分钟，请及时下载或保存。"
         self.help_text.setText((ios if index == 0 else android) + "\n" + common)
         if self.mobile_group.isVisible():

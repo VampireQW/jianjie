@@ -2,7 +2,7 @@
 
 简截使用 Python、PySide6 / Qt、NumPy、Pillow、MSS、psutil、qrcode，以及 SQLite。文件搜索内核通过 Zig / Clang 构建；各第三方组件的许可仍以各自项目为准。
 
-iPhone 快捷指令入口使用 [Clipboard EX](https://www.icloud.com/shortcuts/321944d62831416f9d2ba7917917686a)，互传服务兼容 SyncClipboard 的相关传输协议。
+iPhone 快捷指令入口使用 [简截互传2 路径版本](https://www.icloud.com/shortcuts/4707c68f12574101a71f666d029996c5)，原始模板参考 [Clipboard EX](https://www.icloud.com/shortcuts/321944d62831416f9d2ba7917917686a)。互传服务兼容 SyncClipboard 的相关传输协议。
 
 ## Lucide / Feather 图标
 

@@ -20,8 +20,8 @@ from phone_exchange import MAX_FILE_BYTES, FILE_LIMIT_LABEL, FILE_CHUNK_BYTES, D
 FILE_IO_TIMEOUT = 60
 DOWNLOAD_TICKET_TTL = 10 * 60
 PORT = 5034
-SHORTCUT_URL = "https://www.icloud.com/shortcuts/321944d62831416f9d2ba7917917686a"
-SHORTCUT_NAME = "Clipboard EX"
+SHORTCUT_URL = "https://www.icloud.com/shortcuts/4707c68f12574101a71f666d029996c5"
+SHORTCUT_NAME = "简截互传2 路径版本"
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
 _MAX_MANIFEST_BYTES = 8 * 1024
 _LAN_RANGES = tuple(ipaddress.ip_network(net) for net in
