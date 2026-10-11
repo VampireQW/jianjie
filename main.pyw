@@ -2859,7 +2859,7 @@ def smoke():
         _okm = _okm and _rc == (9, 5, "x.log", False, fsearch.USN_FILE_CREATE, 70)
         _buf = _st.pack("<Q", 777) \
             + fsearch.usn_record_v2_bytes(103, 101, 0x20, "calc.exe", reason=fsearch.USN_FILE_CREATE) \
-            + fsearch.usn_record_v2_bytes(102, 101, 0x20, "notepad2.exe", reason=fsearch.USN_RENAME_NEW)
+            + fsearch.usn_record_v2_bytes(102, 101, 0x20, "notepad2.exe", reason=0x00002000)
         _mv, _nu = fsearch._apply_usn_records(_fx, "C:", _buf)
         _fx.commit()
         _okm = _okm and _mv == 2 and _nu == 777 \

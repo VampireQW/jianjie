@@ -58,8 +58,11 @@ FSCTL_QUERY_USN_JOURNAL = 0x000900F4
 FSCTL_READ_USN_JOURNAL = 0x000900BB
 USN_FILE_CREATE = 0x00000100
 USN_FILE_DELETE = 0x00000200
-USN_RENAME_NEW = 0x00001000
-USN_RENAME_OLD = 0x00002000
+# Windows USN_REASON_* values: OLD_NAME=0x1000, NEW_NAME=0x2000.
+# https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-read_usn_journal_data_v0
+USN_RENAME_NEW = 0x00002000
+USN_RENAME_OLD = 0x00001000
+_USN_REASON_VERSION = "2"                  # R255：旧 USN 索引需要校准一次，纠正已写入的旧名称
 USN_WATCH_MASK = (USN_FILE_CREATE | USN_FILE_DELETE | USN_RENAME_NEW | USN_RENAME_OLD)
 _RJ_V1 = struct.Struct("<QIIQQQHH")       # READ_USN_JOURNAL_DATA_V1（BytesToWaitFor=1 阻塞等新记录）
 _JOURNAL_DATA = struct.Struct("<QQQQQ")   # USN_JOURNAL_DATA：id/first/next/lowest/max
@@ -315,9 +318,23 @@ def _meta_set(con, k, val):
 INDEX_TTL = 2 * 3600    # 索引新鲜阈值（秒）：超时后台全量追平——非管理员无法增量校准，监控只覆盖运行期
 
 
-def _index_fresh(con):
+def _usn_index_needs_repair(con, drive=None):
+    """只检查旧 USN 卷的元数据，避免启动时扫描文件表。"""
+    if drive is not None:
+        return (_meta_get(con, "jid:" + drive) is not None
+                and _meta_get(con, "usn_reason_version:" + drive) != _USN_REASON_VERSION)
+    return con.execute(
+        "SELECT 1 FROM meta AS journal WHERE journal.k LIKE 'jid:%' "
+        "AND NOT EXISTS (SELECT 1 FROM meta AS version "
+        "WHERE version.k='usn_reason_version:' || substr(journal.k,5) AND version.v=?) LIMIT 1",
+        (_USN_REASON_VERSION,)).fetchone() is not None
+
+
+def _index_fresh(con, drive=None):
     """索引在 TTL 内视为新鲜：跳全量直接监控接管（重启应用不再白跑一趟全量遍历）。"""
     try:
+        if _usn_index_needs_repair(con, drive):
+            return False
         b = _meta_get(con, "built_at")
         return bool(b) and (time.time() - float(b)) < INDEX_TTL
     except (TypeError, ValueError):
@@ -755,7 +772,8 @@ class _IndexWorker(threading.Thread):
 
     # ---- 每卷策略：新鲜监控接管 → USN 增量校准 → MFT 直读全量 → 目录遍历换表 ----
     def _volume(self, con, drive):
-        if not self.force and _index_fresh(con):
+        repair_usn = _usn_index_needs_repair(con, drive)
+        if not self.force and _index_fresh(con, drive):
             # 索引新鲜：跳全量遍历/直读，按原模式直接起监控（重启应用秒就绪）
             self.mode = "监控接管"
             h = _open_volume(drive)
@@ -773,7 +791,7 @@ class _IndexWorker(threading.Thread):
             return
         h = _open_volume(drive)
         j = _query_journal(h) if h else None
-        if j and not self.force:
+        if j and not self.force and not repair_usn:
             jid, _next = j
             stored = _meta_get(con, "jid:" + drive)
             if stored == str(jid):
@@ -802,16 +820,19 @@ class _IndexWorker(threading.Thread):
             finally:
                 _kernel32.CloseHandle(h)
         if usn_ok:
+            _meta_set(con, "usn_reason_version:" + drive, _USN_REASON_VERSION)
             if j2:
                 _meta_set(con, "jid:" + drive, j2[0])
                 _meta_set(con, "usn:" + drive, j2[1])
                 con.commit()
                 _start_monitor(drive, "usn", j2[0], j2[1])
             else:
+                con.commit()
                 _mon_note[drive] = "USN 日志未激活，本卷无实时监控"
             return
         self.mode = "目录遍历"
         self._walk_swap(con, drive)
+        _meta_set(con, "usn_reason_version:" + drive, _USN_REASON_VERSION)
         con.commit()
         _start_monitor(drive, "dir")
 
