@@ -552,6 +552,8 @@ class MirrorDialog(CardDialog):
         bar_policy.setRetainSizeWhenHidden(True)
         self.bar.setSizePolicy(bar_policy)
         self.bar.setTextVisible(False)
+        self.bar.setValue(0)
+        self.bar.hide()
         self.bar.setStyleSheet("QProgressBar{background:#252f42;border:none;border-radius:3px;}"
                               "QProgressBar::chunk{background:#60a5fa;border-radius:3px;}")
         hero_lay.addWidget(self.bar)
@@ -635,8 +637,12 @@ class MirrorDialog(CardDialog):
         for control in (self.name, self.audio, self.quality_button, self.fps_button):
             control.setToolTip("等待手机连接时可修改，接收服务会自动应用设置。")
         session.changed.connect(self.refresh)
-        session.progress.connect(self.bar.setValue)
+        session.progress.connect(self.update_progress)
         self.refresh(session.state, session.detail)
+
+    def update_progress(self, value):
+        self.bar.setValue(value)
+        self.bar.setVisible(self.session.state == "preparing" and 0 < value < 100)
 
     def refresh(self, state, detail):
         names = {"idle": "接收未开启", "preparing": "正在准备组件", "starting": "正在开启接收",
@@ -662,7 +668,7 @@ class MirrorDialog(CardDialog):
         self.quality_button.setEnabled(not busy)
         self.fps_button.setEnabled(not busy)
         self.import_button.setEnabled(state in ("idle", "error"))
-        self.bar.setVisible(state in ("preparing", "stopping"))
+        self.bar.setVisible(state == "preparing" and 0 < self.bar.value() < 100)
         self.stop_button.setEnabled(connected)
         self.stop_button.setCursor(Qt.PointingHandCursor if connected else Qt.ArrowCursor)
         self.stop_button.setToolTip("结束当前手机投屏" if connected else "手机连接成功后可关闭投屏")

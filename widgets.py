@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from PySide6.QtCore import Qt, QTimer, QDate, QRect, QRectF, QSize, QPoint, QEvent, QObject, Signal
 from PySide6.QtGui import (QColor, QFont, QGuiApplication, QImage, QImageReader, QKeySequence, QPainter,
-                           QPen, QPixmap, QShortcut)
+                           QPen, QPixmap, QShortcut, QTextCursor)
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCalendarWidget, QCheckBox, QDialog, QFrame,
                                QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QListWidget,
@@ -2121,10 +2121,38 @@ class NotesWindow(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self._save)
         self.edit.textChanged.connect(lambda: self._save_timer.start())
+        if seed:
+            self.edit.document().setModified(True)
+            self._save_timer.start()
         QTimer.singleShot(50, self.edit.setFocus)
 
+    def prepend_text(self, text):
+        """剪贴板内容插入现有快记顶部，保留正在编辑且尚未保存的内容。"""
+        cursor = self.edit.textCursor()
+        cursor.movePosition(QTextCursor.Start)
+        cursor.insertText(text + ("\n\n" if not self.edit.document().isEmpty() else ""))
+        self.edit.setTextCursor(cursor)
+        self.edit.ensureCursorVisible()
+        self.edit.setFocus()
+
     def _save(self):
-        C.save_notes(self.edit.toPlainText())
+        try:
+            C.save_notes(self.edit.toPlainText())
+        except OSError:
+            self.saved.setText("保存失败，请检查数据目录")
+            return False
+        self.edit.document().setModified(False)
+        self.saved.setText("已自动保存至 notes.md")
+        return True
+
+    def closeEvent(self, event):
+        # UI 销毁前完成尚在 800 ms 防抖期内的保存。
+        if self._save_timer.isActive() or self.edit.document().isModified():
+            self._save_timer.stop()
+            if not self._save():
+                event.ignore()
+                return
+        super().closeEvent(event)
 
 
 # ---------- 剪贴板历史（R68 起只收图片；R156 方卡网格，悬停顶部胶囊浮钮：钉/编辑/删除） ----------

@@ -348,7 +348,7 @@ class ShotNotifyCard(QWidget):
             callback()
 
     def show_shot(self, pm, title, sub, on_edit, on_send=None):
-        """pm=QPixmap（可带 DPR）；on_edit=点击进入编辑回调。重复调用＝换内容重置倒计时。"""
+        """接收 QImage/QPixmap（可带 DPR）；只将缩略尺寸转换为 QPixmap。"""
         from PySide6.QtCore import QRectF
         from PySide6.QtGui import QPainter, QPainterPath
         self._on_edit = on_edit
@@ -357,6 +357,8 @@ class ShotNotifyCard(QWidget):
         d = pm.devicePixelRatio() or 1.0
         t = pm.scaled(round(self.THUMB_W * d), round(self.THUMB_H * d),
                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if isinstance(t, QImage):
+            t = QPixmap.fromImage(t)
         t.setDevicePixelRatio(d)
         rounded = QPixmap(t.size())
         rounded.fill(Qt.transparent)
@@ -945,7 +947,7 @@ class Controller(QObject):
         self._toast.show_msg(msg)          # 屏上浮出，2.4s 自动消失
 
     def notify_shot(self, pm, title, sub, img):
-        """R154 截图/长截图完成通知：右下角缩略图卡（整合原纯文字 toast）；点击进入编辑。"""
+        """截图/长截图完成通知：原图可直接传入，只为缩略图创建 QPixmap。"""
         self._shot_notify.show_shot(pm, title, sub, lambda: self._open_image_editor(img),
                                     lambda: self._send_exchange_image(img))
 
@@ -954,8 +956,8 @@ class Controller(QObject):
         落盘走临时目录用完即删不污染图片目录，交付仍走 long_finished（复制+新通知卡）。"""
         import numpy as _np
         im = img.convertToFormat(QImage.Format_RGB888)
-        raw = bytes(im.constBits())
-        arr = _np.frombuffer(raw, dtype=_np.uint8).reshape(im.height(), im.bytesPerLine())
+        # im 在编辑器构造结束前存活；LongCanvas 会复制其底稿，不持有此视图。
+        arr = _np.frombuffer(im.constBits(), dtype=_np.uint8).reshape(im.height(), im.bytesPerLine())
         arr = _np.ascontiguousarray(arr[:, :im.width() * 3].reshape(im.height(), im.width(), 3))
         self._track_long_editor(LongEditor(
             arr, frames=0, on_done=self.long_finished,
@@ -1011,6 +1013,7 @@ class Controller(QObject):
             self.dispatch(meth, arg)
             attributes = {"phone_receive": "_phone_dialog", "iphone_mirror": "_mirror_dialog",
                           "settings": "_settings_dialog", "clip": "_clip_win", "calendar": "_cal",
+                          "todo": "_todo", "notes": "_notes",
                           "pomodoro": "_pomo", "fsearch": "_fswin", "netspeed": "_netspeed_w"}
             window = (getattr(self.tasks, "widget", None) if meth == "note" else
                       getattr(self, attributes.get(meth, ""), None))
@@ -1508,7 +1511,7 @@ class Controller(QObject):
         if img is None:
             img = QImage(path)
         if not img.isNull():
-            self.notify_shot(QPixmap.fromImage(img), f"长截图完成 · {frames} 屏", _sub, img)
+            self.notify_shot(img, f"长截图完成 · {frames} 屏", _sub, img)
         else:
             self.toast(f"长截图完成 · {frames} 屏 · {_sub} · {path}")   # 图读取失败兜底纯文字
         self.long_bar = None
@@ -1591,23 +1594,49 @@ class Controller(QObject):
         self.toast("已钉在桌面 · 双击关闭")
 
     # ---- 剪贴板 ----
+    def _show_tool_window(self, attribute, factory, delete_on_close=True):
+        """复用打开的普通工具；关闭后销毁 UI，并清除控制器的引用。"""
+        window = getattr(self, attribute, None)
+        if window is not None:
+            try:
+                visible = window.isVisible()
+                if delete_on_close and not visible:
+                    # close 后的延迟销毁可能尚未处理，避免重新显示待销毁的窗口。
+                    window.close()
+                    window = None
+            except RuntimeError:
+                window = None  # Qt 对象已销毁，旧 Python 包装器尚未清理。
+        if window is None:
+            window = factory()
+            generation = object()
+            generation_attribute = attribute + "_generation"
+            setattr(self, attribute, window)
+            setattr(self, generation_attribute, generation)
+            window.setAttribute(Qt.WA_DeleteOnClose, delete_on_close)
+
+            def forget(_object=None):
+                if getattr(self, generation_attribute, None) is generation:
+                    setattr(self, attribute, None)
+                    setattr(self, generation_attribute, None)
+
+            window.destroyed.connect(forget)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        return window
+
     def clip(self, arg=""):
         # R123：空历史也照常开窗（窗口内 empty 空态提示），不再只弹 2.4s 即逝的 toast——
         # 用户反馈空历史时「点剪贴板像没反应」，窗口常开才符合面板入口预期
-        if self._clip_win is not None and self._clip_win.isVisible():
-            self._clip_win.raise_()            # 已开着：提到最前，不重复开窗
-            self._clip_win.activateWindow()
-            return
-        self._clip_win = W.ClipHistoryWindow(
+        self._show_tool_window("_clip_win", lambda: W.ClipHistoryWindow(
             self.clip_history, on_pin=self.pin_pixmap,
             on_edit_text=self._clip_edit_text, on_edit_img=self._clip_edit_img,
-            on_delete=self._discard_clip_entry, on_send=self._send_exchange_entry)
-        self._clip_win.show()                  # 回归：之前只建不 show＝点击无反应
+            on_delete=self._discard_clip_entry, on_send=self._send_exchange_entry))
 
     def _clip_edit_text(self, t):
         """文本条目编辑：送入快记顶部，可继续补充并随快记自动保存。"""
-        self._notes = W.NotesWindow(seed=t)
-        self._notes.show()
+        window = self._show_tool_window("_notes", W.NotesWindow)
+        window.prepend_text(t)
         self.toast("已在快记顶部插入，可继续编辑")
 
     def _clip_edit_img(self, img):
@@ -1678,23 +1707,20 @@ class Controller(QObject):
             w.prepend_entry(e)
 
     # ---- 小组件 ----
-    def todo(self):
-        self._todo = W.TodoWindow()
-        self._todo.show()
+    def todo(self, arg=""):
+        self._show_tool_window("_todo", W.TodoWindow)
 
     def notes(self, arg=""):
-        self._notes = W.NotesWindow()
-        self._notes.show()
+        self._show_tool_window("_notes", W.NotesWindow)
 
     def calendar(self, arg=""):
-        self._cal = W.CalendarWindow()
-        self._cal.show()
+        self._show_tool_window("_cal", W.CalendarWindow)
 
     def pomodoro(self, arg=""):
-        self._pomo = W.PomodoroWindow(
+        # 计时状态和定时器在窗口内；关闭仅隐藏，重开复用，避免计时重置或重复。
+        self._show_tool_window("_pomo", lambda: W.PomodoroWindow(
             self.S, notify=lambda t, m: self.tray.showMessage(
-                t, m, QSystemTrayIcon.Information, 2200))
-        self._pomo.show()
+                t, m, QSystemTrayIcon.Information, 2200)), delete_on_close=False)
 
     def _prewarm_fsearch(self):
         import fsearch

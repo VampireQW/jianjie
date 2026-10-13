@@ -26,17 +26,23 @@ def grab_array(scr=None, region=None):
     """目标屏抓帧 → numpy RGB 数组（物理分辨率）。region 为逻辑 QRect 时裁剪到该范围。"""
     scr = scr or QGuiApplication.primaryScreen()
     pm = scr.grabWindow(0)
+    if region is not None and region.width() > 4 and region.height() > 4:
+        d = scr.devicePixelRatio() or 1.0
+        x0, y0 = int(region.x() * d), int(region.y() * d)
+        x1, y1 = int((region.x() + region.width()) * d), int((region.y() + region.height()) * d)
+        crop = QRect(x0, y0, x1 - x0, y1 - y0).intersected(pm.rect())
+        if crop.isEmpty():
+            return np.empty((0, 0, 3), dtype=np.uint8)
+        # 物理像素先裁剪，避免整屏 RGB 转换、整屏数组及第二次选区复制。
+        pm = pm.copy(crop)
+    if pm.isNull():
+        return np.empty((0, 0, 3), dtype=np.uint8)
     img = pm.toImage().convertToFormat(QImage.Format_RGB888)
     w, h = img.width(), img.height()
     bpl = img.bytesPerLine()
     ptr = img.constBits()
     buf = np.frombuffer(ptr, dtype=np.uint8)
     arr = buf.reshape(h, bpl)[:, :w * 3].reshape(h, w, 3).copy()
-    if region is not None and region.width() > 4 and region.height() > 4:
-        d = scr.devicePixelRatio() or 1.0
-        x0, y0 = int(region.x() * d), int(region.y() * d)
-        x1, y1 = int((region.x() + region.width()) * d), int((region.y() + region.height()) * d)
-        arr = arr[max(0, y0):min(h, y1), max(0, x0):min(w, x1)].copy()
     return arr
 
 

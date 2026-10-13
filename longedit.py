@@ -48,8 +48,9 @@ class LongCanvas(QWidget):
         self.setFixedSize(round(w * self._k), round(h * self._k))
         # R86 底图缓存：k 缩放一次性付清；paintEvent 纯 blit——超高图（如 1920×35000）
         # 每次滚动/hover 重绘都对全图重采样，单帧数百 ms，是长图编辑器卡顿主因。
-        self._base_pm = QPixmap.fromImage(self._base).scaled(
-            self.width(), self.height(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        # 先缩放 RGB 底稿，只转换预览尺寸，避免额外生成全尺寸 QPixmap。
+        self._base_pm = QPixmap.fromImage(self._base.scaled(
+            self.width(), self.height(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
         self.sel = QRect(0, 0, self.width(), self.height())   # 复用 _fit_anno_editor 的边界
         self.setFocusPolicy(Qt.ClickFocus)
         self.setMouseTracking(True)   # R76：悬浮 hover 光标前提——不开此项 Qt 只在按住键时才发 move 事件

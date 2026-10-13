@@ -53,7 +53,9 @@ _HIGH_USN = 0x7FFFFFFFFFFFFFFF
 _BATCH = 8192             # 索引线程每批最多暂存约 8k 行，避免 5 万行路径驻留
 _RESULT_CAP = 500
 _GENERIC_READ = 0x80000000
-_FILE_REPARSE = 0x400                     # junction/符号链接目录：入索引但不下钻（否则环爆 3GB）
+_FILE_REPARSE = 0x400                     # 重解析属性也用于云文件，不能据此直接跳过目录
+_REPARSE_NAME_SURROGATE = 0x20000000       # 标签的 N 位：重定向到另一命名实体（联接/符号链接）
+_DIRECTORY_SCAN_VERSION = "2"             # R270：旧目录索引需校准一次，补入误跳过的云目录
 FSCTL_QUERY_USN_JOURNAL = 0x000900F4
 FSCTL_READ_USN_JOURNAL = 0x000900BB
 USN_FILE_CREATE = 0x00000100
@@ -333,6 +335,9 @@ def _usn_index_needs_repair(con, drive=None):
 def _index_fresh(con, drive=None):
     """索引在 TTL 内视为新鲜：跳全量直接监控接管（重启应用不再白跑一趟全量遍历）。"""
     try:
+        policy_key = "directory_scan_version" + (":" + drive if drive is not None else "")
+        if _meta_get(con, policy_key) != _DIRECTORY_SCAN_VERSION:
+            return False
         if _usn_index_needs_repair(con, drive):
             return False
         b = _meta_get(con, "built_at")
@@ -470,7 +475,7 @@ def _apply_fni(con, v, action, rel, old_rel=None, excluded=None):
 
 
 def _walk_rows(con, drive, table="files"):
-    """目录遍历整卷写表；junction 入索引不下钻（防「Application Data」自指环）。"""
+    """遍历整卷；云目录正常下钻，路径重定向目录只入索引，防联接自指环。"""
     stack = [drive + "\\"]
     rows = []
     total = 0
@@ -496,14 +501,16 @@ def _walk_rows(con, drive, table="files"):
                     continue
                 if isdir:
                     try:
-                        reparse = bool(e.stat(follow_symlinks=False)
-                                       .st_file_attributes & _FILE_REPARSE)
+                        info = e.stat(follow_symlinks=False)
+                        tag = getattr(info, "st_reparse_tag", 0)
+                        # IsReparseTagNameSurrogate：云目录标签的 N 位为 0，允许子目录。
+                        # 标签未知时保守跳过，避免无法识别的路径重定向形成扫描环。
+                        redirects = bool(info.st_file_attributes & _FILE_REPARSE
+                                         and (not tag or tag & _REPARSE_NAME_SURROGATE))
                     except OSError:
-                        reparse = False
-                    if reparse:
-                        rows.append((drive, 0, 0, name, name.lower(), 1, e.path))
-                        continue              # junction 入索引但不下钻
-                    stack.append(e.path)
+                        redirects = False
+                    if not redirects:
+                        stack.append(e.path)
                 rows.append((drive, 0, 0, name, name.lower(), int(isdir), e.path))
                 if len(rows) >= _BATCH:
                     with _wlock:            # 写事务段串行：与监控落库互斥但不互等 SQLite 锁
@@ -673,6 +680,7 @@ def _rewalk_volume(v):
             con.execute("INSERT INTO files SELECT * FROM temp.vol_tmp")
             con.execute("DROP TABLE temp.vol_tmp")
             con.execute("DELETE FROM meta WHERE k IN (?, ?)", ("jid:" + v, "usn:" + v))
+            _meta_set(con, "directory_scan_version:" + v, _DIRECTORY_SCAN_VERSION)
             con.commit()
         con.close()
         _DIRTY["n"] += 1
@@ -737,12 +745,15 @@ class _IndexWorker(threading.Thread):
                 _check_running()
                 self.vol = d
                 self._volume(con, d)
+                _meta_set(con, "directory_scan_version:" + d, _DIRECTORY_SCAN_VERSION)
+                con.commit()
             con.commit()
             _total = self.count
             try:                                 # 记录上次索引时间与总项数（供窗口信息条显示）
                 _total = con.execute("SELECT COUNT(*) FROM files").fetchone()[0]
                 _meta_set(con, "built_at", int(time.time()))
                 _meta_set(con, "count", _total)
+                _meta_set(con, "directory_scan_version", _DIRECTORY_SCAN_VERSION)
                 con.commit()
             except Exception as _me:                 # meta 失败不致命，但必须可见（不再静默吞）
                 self.meta_err = "{}: {}".format(type(_me).__name__, _me)

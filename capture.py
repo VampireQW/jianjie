@@ -9,7 +9,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSiz
 from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QImage,
                            QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QRegion,
                            QTextCursor, QTextLayout, QTextOption)
-from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
                                QSizePolicy, QSpacerItem, QTextEdit, QWidget, QVBoxLayout)
 
 import common as C
@@ -301,6 +301,8 @@ def snapshot_windows():
     u.EnumChildWindows.argtypes = [wt.HWND, callback, wt.LPARAM]
     u.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ct.c_int]
     u.GetWindowRect.argtypes = [wt.HWND, ct.POINTER(wt.RECT)]
+    u.GetClientRect.argtypes = [wt.HWND, ct.POINTER(wt.RECT)]
+    u.ClientToScreen.argtypes = [wt.HWND, ct.POINTER(wt.POINT)]
     u.IsWindowVisible.argtypes = u.IsIconic.argtypes = [wt.HWND]
     u.GetWindowThreadProcessId.argtypes = [wt.HWND, ct.POINTER(wt.DWORD)]
     d.DwmGetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ct.c_void_p, wt.DWORD]
@@ -313,6 +315,20 @@ def snapshot_windows():
     browsers = {"chrome.exe", "msedge.exe", "brave.exe", "opera.exe", "vivaldi.exe",
                 "chromium.exe", "360chrome.exe", "360se.exe", "qqbrowser.exe"}
     processes, found = {}, []
+    own_panels = {}
+    for window in QApplication.topLevelWidgets():
+        try:
+            if not window.isVisible() or not window.testAttribute(Qt.WA_TranslucentBackground):
+                continue
+            layout, handle = window.layout(), window.windowHandle()
+            if layout is None or layout.count() != 1 or handle is None:
+                continue
+            body = layout.itemAt(0).widget()
+            if (isinstance(body, QFrame) and body.isVisible()
+                    and body.objectName() in {"cardBody", "pluginBody", "taskBody", "calBody", "nsBody"}):
+                own_panels[int(handle.winId())] = (window, body)
+        except RuntimeError:
+            continue
 
     def class_name(hwnd):
         text = ct.create_unicode_buffer(256)
@@ -342,6 +358,29 @@ def snapshot_windows():
             processes[pid.value] = name in browsers
         return processes[pid.value]
 
+    def panel_bounds(hwnd, outer):
+        panel = own_panels.get(hwnd)
+        if panel is None:
+            return outer
+        try:
+            window, body = panel
+            client, origin = wt.RECT(), wt.POINT()
+            if (window.width() <= 0 or window.height() <= 0
+                    or not u.GetClientRect(hwnd, ct.byref(client))
+                    or not u.ClientToScreen(hwnd, ct.byref(origin))):
+                return outer
+            sx = (client.right - client.left) / window.width()
+            sy = (client.bottom - client.top) / window.height()
+            position = body.mapTo(window, QPoint(0, 0))
+            left = origin.x + round(position.x() * sx)
+            top = origin.y + round(position.y() * sy)
+            right = origin.x + round((position.x() + body.width()) * sx)
+            bottom = origin.y + round((position.y() + body.height()) * sy)
+            area = QRect(left, top, right - left, bottom - top).intersected(outer)
+            return area if area.width() >= 8 and area.height() >= 8 else outer
+        except RuntimeError:
+            return outer
+
     @callback
     def visit(hwnd, _):
         if not u.IsWindowVisible(hwnd) or u.IsIconic(hwnd):
@@ -353,7 +392,7 @@ def snapshot_windows():
         if (d.DwmGetWindowAttribute(hwnd, 14, ct.byref(cloaked), ct.sizeof(cloaked)) == 0
                 and cloaked.value):
             return True
-        rect = bounds(hwnd, True)
+        rect = panel_bounds(hwnd, bounds(hwnd, True))
         if rect.width() < 8 or rect.height() < 8:
             return True
         contents = []
