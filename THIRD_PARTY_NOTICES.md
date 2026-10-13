@@ -4,6 +4,17 @@
 
 iPhone 快捷指令入口使用 [简截互传2 路径版本](https://www.icloud.com/shortcuts/4707c68f12574101a71f666d029996c5)，原始模板参考 [Clipboard EX](https://www.icloud.com/shortcuts/321944d62831416f9d2ba7917917686a)。互传服务兼容 SyncClipboard 的相关传输协议。
 
+## iPhone 投屏组件
+
+独立 AirPlay 接收器基于 [FDH2/UxPlay](https://github.com/FDH2/UxPlay)，
+使用固定源码 ec203121355220dd90278a369eeabb0b8ba4f14a，并作 Windows 兼容、
+中文参数、会话退出与状态通知调整。引擎遵循 GPLv3，对应修改源码和完整许可
+以 source.zip、LICENSE 随应用提供，详见 native/airplay/BUILD.md。
+
+首次使用的媒体运行库从 [uxplay-windows 官方发布](https://github.com/leapbtw/uxplay-windows/releases/tag/2.0.0.1736)
+按固定版本下载并校验。涉及 GStreamer、GLib、OpenSSL、libplist、FFmpeg 等组件，
+各组件的许可及对应源码以其上游项目和原发布包说明为准。
+
 ## Lucide / Feather 图标
 
 `icons.py` 中的部分 SVG 图标来自 [Lucide](https://github.com/lucide-icons/lucide)。以下保留其[许可声明](https://github.com/lucide-icons/lucide/blob/main/LICENSE)。这些声明适用于相应图标，不代表简截整个项目采用相同许可。

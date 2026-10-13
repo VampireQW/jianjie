@@ -517,6 +517,7 @@ class Controller(QObject):
         self.tray = tray
         self.panel = panel
         self.S = settings
+        self._panel_capture_ticket = None
         self.pin_win = None
         self._pin_generation = None
         self._long_editor = None
@@ -554,6 +555,8 @@ class Controller(QObject):
         QApplication.instance().aboutToQuit.connect(self._shutdown_clip_cache)
         self._clip_win = None
         self._settings_dialog = None
+        self._mirror_session = None
+        self._mirror_dialog = None
         self._autostart_action = None
         self._cb_seq = None              # 只监听本次启动后产生的图片，避免启动时解码旧大图
         try:
@@ -972,11 +975,62 @@ class Controller(QObject):
 
         editor.destroyed.connect(forget)
 
+    def iphone_mirror(self, arg=""):
+        from iphone_mirror import MirrorDialog, MirrorSession
+        if self._mirror_session is None:
+            self._mirror_session = MirrorSession(self)
+            QApplication.instance().aboutToQuit.connect(self._mirror_session.shutdown)
+        dialog = self._mirror_dialog
+        if dialog is not None:
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            if self._mirror_session.state in ("idle", "error"):
+                QTimer.singleShot(0, dialog.begin)
+            return
+        dialog = MirrorDialog(self._mirror_session, self.S, self.panel)
+        self._mirror_dialog = dialog
+
+        def forget(_object=None):
+            if self._mirror_dialog is dialog:
+                self._mirror_dialog = None
+
+        dialog.destroyed.connect(forget)
+        dialog.show()
+        C.force_foreground(dialog)
+        QTimer.singleShot(0, dialog.begin)
+
     def dispatch(self, meth, arg):
         try:
             getattr(self, meth)(arg)
-        except Exception as e:                 # 面板已 hide，失败必须可见而不是无声无息
+        except Exception as e:
             self.toast(f"「{meth}」执行失败 · {e}")
+
+    def dispatch_panel(self, meth, arg):
+        def open_tool():
+            self.dispatch(meth, arg)
+            attributes = {"phone_receive": "_phone_dialog", "iphone_mirror": "_mirror_dialog",
+                          "settings": "_settings_dialog", "clip": "_clip_win", "calendar": "_cal",
+                          "pomodoro": "_pomo", "fsearch": "_fswin", "netspeed": "_netspeed_w"}
+            window = (getattr(self.tasks, "widget", None) if meth == "note" else
+                      getattr(self, attributes.get(meth, ""), None))
+            if window is not None and window.isVisible():
+                self.panel.launch_session.track(window)
+                window.raise_()
+                window.activateWindow()
+                C.force_foreground(window)
+        self.panel.launch_session.launch(open_tool)
+
+    def _finish_panel_capture(self):
+        ticket, self._panel_capture_ticket = self._panel_capture_ticket, None
+        self.panel.launch_session.release(ticket)
+
+    def _begin_panel_capture(self):
+        self._panel_capture_ticket = self.panel.launch_session.hold()
+        if self._panel_capture_ticket is not None:
+            # Keep the window open behind the target application while its
+            # desktop image is captured; the return session restores its focus.
+            self.panel.lower()
 
     # ---- 任务清单（R87） ----
     def note(self, arg=""):
@@ -995,15 +1049,21 @@ class Controller(QObject):
         self.start_shot(ocr=True)
 
     def start_shot(self, ocr=False, scan=False, hotkey=False):
+        if self._panel_capture_ticket is not None or self.shot_overlays or self._cp_active:
+            return
         # 全局热键不改变前台：趁原应用浮窗仍在，先抓画面再显示编辑层。
-        # 从面板点击时仍先隐藏面板，避免把简截自身截进画面。
-        immediate = hotkey and not self.panel.isVisible()
+        # 主面板保持开启；全局热键仍在前台浮窗失焦前冻结画面。
+        immediate = hotkey
         frozen = freeze_screens() if immediate else None
-        if not immediate:
-            self.panel.hide()
+        self._begin_panel_capture()
 
         def do():
-            ovs = create_overlays(self.shot_finished, ocr=ocr, scan=scan, frozen=frozen)   # 每屏一个，先到先得
+            try:
+                ovs = create_overlays(self.shot_finished, ocr=ocr, scan=scan, frozen=frozen)
+            except Exception as error:
+                self._finish_panel_capture()
+                self.toast(f"截图启动失败 · {error}")
+                return
             for ov in ovs:
                 ov.pinned.connect(self.pin_pixmap)
             self.shot_overlays = ovs
@@ -1013,6 +1073,12 @@ class Controller(QObject):
             QTimer.singleShot(160, do)
 
     def shot_finished(self, result):
+        try:
+            self._complete_shot(result)
+        finally:
+            self._finish_panel_capture()
+
+    def _complete_shot(self, result):
         close_all(self.shot_overlays)              # 多屏组清理（跳过已删败者：炸了 start_gif 就永远轮不到）
         self.shot_overlays = None
         if not result:
@@ -1364,28 +1430,46 @@ class Controller(QObject):
 
     def long_edit(self, arr, frames):
         """编辑按钮：停止拼接后带长图进编辑器；完成仍走 long_finished（剪贴板+toast）。"""
+        panel_group = self.panel.launch_session.group_for(self.long_bar)
         self.long_bar = None
-        self._track_long_editor(LongEditor(
-            arr, frames, on_done=self.long_finished, on_cancel=lambda: None))
+        def open_editor():
+            self._track_long_editor(LongEditor(
+                arr, frames, on_done=self.long_finished, on_cancel=lambda: None))
+        if panel_group is not None:
+            self.panel.launch_session.launch(open_editor, panel_group)
+        else:
+            open_editor()
 
     # ---- 范围框选（长截图/其他工具共用）----
     def pick_region(self, cb, hotkey=False):
         """纯框选范围（不进标注）；cb(sel, screen)，Esc 取消 cb(None, None)。"""
+        if self._panel_capture_ticket is not None or self.shot_overlays or self._cp_active:
+            return
         # 录屏热键同截图：先冻结前台画面和窗口位置，保留原应用的临时浮窗。
-        immediate = hotkey and not self.panel.isVisible()
+        immediate = hotkey
         frozen = freeze_screens() if immediate else None
-        if not immediate:
-            self.panel.hide()
+        self._begin_panel_capture()
         self._pick_cb = cb
 
         def do():
-            self.shot_overlays = create_overlays(self.pick_finished, pick=True, frozen=frozen)
+            try:
+                self.shot_overlays = create_overlays(self.pick_finished, pick=True, frozen=frozen)
+            except Exception as error:
+                self._pick_cb = None
+                self._finish_panel_capture()
+                self.toast(f"选区启动失败 · {error}")
         if immediate:
             do()
         else:
             QTimer.singleShot(160, do)
 
     def pick_finished(self, result):
+        try:
+            self._complete_pick(result)
+        finally:
+            self._finish_panel_capture()
+
+    def _complete_pick(self, result):
         close_all(self.shot_overlays)              # 多屏组清理（跳过已删败者：R64 同类雷，炸了 cb 就轮不到）
         self.shot_overlays = None
         cb = self._pick_cb
@@ -1455,11 +1539,11 @@ class Controller(QObject):
     # ---- 屏幕取色（R103） ----
     def colorpick(self, arg=""):
         """屏幕取色器：冻结屏+放大镜逐像素取色；左键复制 HEX，右键/Esc 取消。"""
-        if self._cp_active:
+        if self._cp_active or self._panel_capture_ticket is not None or self.shot_overlays:
             return
         self._cp_active = True
         self._cp_generation += 1
-        self.panel.hide()
+        self._begin_panel_capture()
         self._cp_timer.start(160)
 
     def _open_colorpick(self):
@@ -1485,6 +1569,7 @@ class Controller(QObject):
         self._cp_active = False
         ovs, self._cp_ovs = self._cp_ovs, None
         close_all(ovs)
+        self._finish_panel_capture()
         if hexs:
             QGuiApplication.clipboard().setText(hexs)
             self.toast(f"色值 {hexs} 已复制 · 直接粘贴即用")
@@ -1682,6 +1767,21 @@ class Controller(QObject):
 
     # ---- 存放位置 ----
     def save_dir(self, arg=""):
+        mirror = self._mirror_session
+        if mirror is not None and (mirror.process is not None or mirror._preparing):
+            if getattr(self, "_waiting_mirror_storage", False):
+                return
+            self._waiting_mirror_storage = True
+
+            def continue_storage(_state, _detail):
+                if mirror.process is None and not mirror._preparing:
+                    mirror.changed.disconnect(continue_storage)
+                    self._waiting_mirror_storage = False
+                    QTimer.singleShot(0, lambda: self.save_dir(arg))
+
+            mirror.changed.connect(continue_storage)
+            mirror.stop()
+            return
         if getattr(self, "_choosing_save_dir", False):
             return
         self._choosing_save_dir = True
@@ -7508,7 +7608,7 @@ def main():
     tray = QSystemTrayIcon(C.app_qicon())
     tray.setToolTip("简截 Lite · 截图/长截图" if LITE else "简截 JianJie for Windows")   # R107 两版同驻可辨
     ctl = Controller(tray, panel, S)
-    panel.actionTriggered.connect(ctl.dispatch)
+    panel.actionTriggered.connect(ctl.dispatch_panel)
 
     menu = QMenu()
     def add(label, fn):
@@ -7520,6 +7620,7 @@ def main():
     add("长截图", lambda: ctl.long())
     if not LITE:
         add("简捷互传…", lambda: ctl.phone_receive())
+        add("iPhone 投屏…", lambda: ctl.iphone_mirror())
     if not LITE:                                   # R107 轻量版：录屏/取色入口裁
         add("录屏", lambda: ctl.rec())
         add("屏幕取色", lambda: ctl.colorpick())         # R103
@@ -7543,7 +7644,9 @@ def main():
     tray.setContextMenu(menu)
     tray.activated.connect(lambda r: tray_activate(panel, r))
     tray.show()
-    if "--phone-receive" in sys.argv:
+    if "--iphone-mirror" in sys.argv:
+        QTimer.singleShot(300, lambda: (panel.popup(), ctl.dispatch_panel("iphone_mirror", "start")))
+    elif "--phone-receive" in sys.argv:
         QTimer.singleShot(300, lambda: (ctl._toggle_phone_receive(True), ctl.phone_receive()))
     else:
         QTimer.singleShot(300, lambda: show_launch_panel(panel, sys.argv))

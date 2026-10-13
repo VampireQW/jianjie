@@ -1,0 +1,12 @@
+{
+  "upstream": "https://github.com/FDH2/UxPlay",
+  "commit": "ec203121355220dd90278a369eeabb0b8ba4f14a",
+  "license": "GPL-3.0",
+  "engineSha256": "3086f8e3af492904e882d07d4b666931d8fd2b2ff6076480a6cee5e93086fb46",
+  "engineBytes": 1054720,
+  "runtimeUrl": "https://github.com/leapbtw/uxplay-windows/releases/download/2.0.0.1736/uxplay-windows.zip",
+  "runtimeSha256": "9d3a51c15fc9db857351195e7eb7bbb21700d9ae25d936a54bcf8536b62cca18",
+  "runtimeBytes": 113529789,
+  "version": "jj-airplay-1",
+  "internalMdns": true
+}

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QGridLayout, Q
 import common as C
 import icons
 from jj_variant import LITE
+from panel_lifecycle import PanelLaunchSession
 
 G1 = "内置简截工具"
 G3 = "系统"
@@ -24,6 +25,7 @@ ACTIONS_FULL = [
     (G1, "提取文字", "文", "#f59e0b", "Windows 离线 OCR", "O", "ocr"),
     (G1, "剪贴板历史", "贴", "#64748b", "最近复制记录", None, "clip"),
     (G1, "简捷互传", "传", C.UI_BADGE_TO, "手机与电脑 · 图片 / 文字 / 文件", None, "phone_receive"),
+    (G1, "iPhone 投屏", "投", "#6366f1", "AirPlay · 手机画面与声音", None, "iphone_mirror"),
     (G1, "一键快剪", "剪", "#f97316", "按秒截取片段", None, "trim"),
     (G1, "一键改图", "图", "#14b8a6", "画图打开最近截图", None, "imgedit"),
     (G1, "二维码生成", "生", "#78716c", "文本生成二维码", None, "qr_gen"),
@@ -50,7 +52,7 @@ ACT_LUCIDE = {
     "ocr": "scan-text", "clip": "clipboard-list", "trim": "film", "imgedit": "paintbrush",
     "qr_gen": "qr-code", "phone_receive": "smartphone", "calendar": "calendar-days", "netspeed": "gauge",
     "pomodoro": "timer", "fsearch": "file-search", "note": "list-todo",
-    "lock": "lock", "showdesk": "monitor",
+    "lock": "lock", "showdesk": "monitor", "iphone_mirror": "airplay",
 }   # R139：theme 映射随面板块退役（头部 sun-moon 钮为硬编码图标，不走本表）
 
 
@@ -97,6 +99,7 @@ class Panel(QWidget):
         self.setWindowIcon(C.app_qicon())    # 任务栏按钮用应用图标，不落回 pythonw 默认
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.S = settings
+        self.launch_session = PanelLaunchSession(self)
         self.pal = C.palette(settings.get("theme", "light"))   # R133 默认浅色 mac 风
         self.resize(680, 640)
         self.setMinimumSize(560, 460)              # R127：主面板支持八向缩放
@@ -368,11 +371,7 @@ class Panel(QWidget):
         b.mousePressEvent = lambda ev, w=b: w.fire() if ev.button() == Qt.LeftButton else None
         return b
 
-    NO_HIDE = {"theme", "save_dir", "open_save_dir", "toast_settings", "settings", "hotkeys"}
-
     def fire(self, meth, arg):
-        if meth not in self.NO_HIDE:
-            self.hide()
         self.actionTriggered.emit(meth, arg)
 
     def toggle_theme_placeholder(self):

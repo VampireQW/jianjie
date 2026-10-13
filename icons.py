@@ -356,6 +356,7 @@ _LUCIDE_TPL = ('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" v
                'stroke-linejoin="round">{inner}</svg>')
 
 LUCIDE = {
+    "airplay": '<path d="M5 17H3a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h18a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-2"/><path d="m12 15 5 6H7Z"/>',
     "settings": '<path d="M9 3h6l.5 3 2 1.2 2.8-1 3 5.2-2.3 2-.1 2.3 2.4 1.8-3 5.2-2.8-1-2 1.2-.5 3H9l-.5-3-2-1.2-2.8 1-3-5.2 2.3-2 .1-2.3L.7 11.4l3-5.2 2.8 1 2-1.2z" transform="translate(2 0) scale(.84)"/><circle cx="12" cy="12" r="3"/>',
     "crosshair": '<circle cx="12" cy="12" r="7"/><path d="M12 2v6M12 16v6M2 12h6M16 12h6"/>',
     "mouse-pointer": '<path d="M4 3v17l4.7-4.5 3.1 6 3.2-1.6-3.1-6 6.4-.9z"/>',

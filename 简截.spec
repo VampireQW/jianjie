@@ -10,10 +10,16 @@ import runpy
 
 LITE = os.environ.get("JJ_LITE") == "1"
 _native_binaries = []
+_airplay_datas = []
 if not LITE:
     # Build from the current C++ source before packaging; never silently ship an old DLL.
     _native_build = runpy.run_path(os.path.join(SPECPATH, "native", "build.py"))
     _native_binaries = [(_native_build["build"](), "native")]
+    _airplay_build = runpy.run_path(os.path.join(SPECPATH, "native", "airplay", "build.py"))
+    _airplay_build["build"]()
+    _airplay_datas = [(os.path.join(SPECPATH, "native", "airplay", name), "native/airplay")
+                      for name in ("receiver.exe", "manifest.json", "LICENSE", "source.zip",
+                                   "configure_firewall.ps1")]
 
 _excludes = [
     "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtQmlModels",
@@ -36,7 +42,7 @@ _excludes = [
 ]
 _hidden = ["psutil", "qrcode"]
 if LITE:
-    _excludes += ["mss", "qrcode", "fsearch", "sqlite3", "recorder_mf"]   # R120：fsearch 懒导入后 Lite 零引用面，sqlite3 仅它所引；cv2 两版同裁已入公共；recorder_mf 仅录屏用
+    _excludes += ["mss", "qrcode", "fsearch", "sqlite3", "recorder_mf", "iphone_mirror"]   # R120：fsearch 懒导入后 Lite 零引用面，sqlite3 仅它所引；cv2 两版同裁已入公共；recorder_mf 仅录屏用
     _hidden = ["psutil"]
 
 # binaries 文件名黑名单兜底（dll/pyd 经 hook collect 路径进入，excludes 挡不住时在此拦截）
@@ -72,7 +78,7 @@ a = Analysis(
     ['main.pyw'],
     pathex=[],
     binaries=_native_binaries,
-    datas=[],
+    datas=_airplay_datas,
     hiddenimports=_hidden,
     hookspath=[],
     hooksconfig={},

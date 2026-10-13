@@ -18,7 +18,7 @@ class StorageDialog(CardDialog):
         locations = (("save_dir", "截图、长截图、GIF 与录屏", C.output_dir(False),
                       "成品直接保存到所选文件夹"),
                      ("data_dir", "应用数据", C.data_dir(),
-                      "任务清单、设置、快记与文件索引"),
+                      "任务清单、设置、快记、文件索引与投屏组件"),
                      ("receive_dir", "收到的互传文件", C.transfers_dir(False),
                       "图片和文件自动保留，关闭软件后仍可查看"))
         for key, title, path, description in locations:
