@@ -1596,6 +1596,8 @@ class ShotOverlay(QWidget):
         col = QColor(p.pen().color())
         p.save()
         shaft_pen = QPen(p.pen())
+        # 短箭头同步缩细箭杆，避免线宽盖住三角头的两侧肩角。
+        shaft_pen.setWidthF(min(shaft_pen.widthF(), 2.0 * half_width * 0.42))
         shaft_pen.setCapStyle(Qt.FlatCap)
         p.setPen(shaft_pen)
         p.drawPath(shaft)
@@ -1605,7 +1607,7 @@ class ShotOverlay(QWidget):
         p.restore()
 
     def _arrow_solid(self, p, s, e, w, c=None):
-        """R183：箭身平顺接入等腰三角箭头；c=None 为直线，弯曲中心线按真实弧长展开。"""
+        """箭身平顺接入三角箭头；短箭保留窄颈，弯曲中心线按真实弧长展开。"""
         sx, sy, ex, ey = s.x(), s.y(), e.x(), e.y()
         cx, cy = ((c.x(), c.y()) if c is not None
                   else ((sx + ex) / 2.0, (sy + ey) / 2.0))
@@ -1629,7 +1631,9 @@ class ShotOverlay(QWidget):
 
         # 微信参考：定尺三角头约 2.5:1，底边外角直接收进较窄箭杆；短箭头才缩小。
         head_base_h = min(max(1.0, w * 5.5), length * 0.14)
-        shaft_h = min(head_base_h, max(0.5, w * 2.0))
+        # R272：箭杆最多占头部宽度的 42%，短箭缩小时仍有清晰肩角；
+        # 常规长箭的原有比例约为 2 / 5.5，无需改变。
+        shaft_h = min(head_base_h * 0.42, max(0.5, w * 2.0))
         head_len = min(max(6.0, w * 13.5), length * 0.42)
         head_base_f = 1.0 - head_len / length
         head_base_dist = head_base_f * length

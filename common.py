@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 APP_NAME = "简截"
 APP_VERSION = "4.13.7-win.1"
-APP_BUILD_ID = "R270"
+APP_BUILD_ID = "R272"
 
 # ---------- 系统剪贴板（Win32 文件引用 / 静态图片） ----------
 _CF_HDROP = 15

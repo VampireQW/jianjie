@@ -177,8 +177,10 @@ class MirrorSession(QObject):
             try:
                 root, meta = component_dir(), metadata()
                 ready = root / "ready.json"
-                cached = json.loads(ready.read_text()) if ready.is_file() else {}
-                if (cached.get("runtimeSha256") == meta["runtimeSha256"]
+                cached = json.loads(ready.read_text()) if not archive and ready.is_file() else {}
+                if archive:
+                    result = install_runtime(archive, self._cancel, self.progress.emit)
+                elif (cached.get("runtimeSha256") == meta["runtimeSha256"]
                         and cached.get("files") and all(
                             (root / name).is_file() and (root / name).stat().st_size == size
                             for name, size in cached["files"].items())):
@@ -187,8 +189,6 @@ class MirrorSession(QObject):
                         if not target.is_file() or _sha(target) != _sha(origin):
                             shutil.copy2(origin, target)
                     result = root
-                elif archive:
-                    result = install_runtime(archive, self._cancel, self.progress.emit)
                 else:
                     root.parent.mkdir(parents=True, exist_ok=True)
                     fd, filename = tempfile.mkstemp(prefix=".airplay-download-", suffix=".zip",
@@ -445,6 +445,8 @@ class MirrorDialog(CardDialog):
         self.settings = settings
         self._closing_window = False
         self._receive_after_stop = session.state == "stopping"
+        self._pending_archive = ""
+        self._choosing_package = False
         self._preferences_pending = False
         self._preferences_timer = QTimer(self)
         self._preferences_timer.setSingleShot(True)
@@ -667,23 +669,33 @@ class MirrorDialog(CardDialog):
         self.low_latency.setEnabled(not busy)
         self.quality_button.setEnabled(not busy)
         self.fps_button.setEnabled(not busy)
-        self.import_button.setEnabled(state in ("idle", "error"))
+        self.import_button.setEnabled(state in ("idle", "error", "ready")
+                                      and not self._choosing_package and not self._closing_window)
+        self.import_button.setToolTip("投屏过程中不能替换组件，请先关闭投屏。" if connected
+                                      else "导入已下载的 ZIP 组件包并重新准备接收。")
         self.bar.setVisible(state == "preparing" and 0 < self.bar.value() < 100)
         self.stop_button.setEnabled(connected)
         self.stop_button.setCursor(Qt.PointingHandCursor if connected else Qt.ArrowCursor)
         self.stop_button.setToolTip("结束当前手机投屏" if connected else "手机连接成功后可关闭投屏")
         if self._closing_window:
             return
-        if state == "idle" and self._receive_after_stop:
+        if state == "error" and self._pending_archive:
+            self._pending_archive = ""
             self._receive_after_stop = False
-            QTimer.singleShot(0, self.begin)
-        elif state == "ready" and self._preferences_pending:
+        if state == "idle" and self._receive_after_stop and not self._choosing_package:
+            self._receive_after_stop = False
+            archive = self._pending_archive
+            self._pending_archive = ""
+            QTimer.singleShot(0, lambda: self.begin(archive))
+        elif state == "ready" and self._preferences_pending and not self._choosing_package:
             self._preferences_timer.start()
 
     def begin(self, archive=""):
-        if self._closing_window or self.session.process is not None or self.session._preparing:
+        if (self._closing_window or self._choosing_package
+                or self.session.process is not None or self.session._preparing):
             return
         self._receive_after_stop = False
+        self._pending_archive = ""
         self._preferences_timer.stop()
         self._preferences_pending = False
         self.settings["mirror_name"] = self.name.text().strip()
@@ -710,7 +722,7 @@ class MirrorDialog(CardDialog):
         self._preferences_timer.start()
 
     def apply_preferences(self):
-        if self._closing_window or not self._preferences_pending:
+        if self._closing_window or self._choosing_package or not self._preferences_pending:
             return
         if self.session.state in ("connected", "streaming", "stopping"):
             return
@@ -756,9 +768,32 @@ class MirrorDialog(CardDialog):
         self.session.stop()
 
     def import_package(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择投屏组件包", "", "投屏组件 (*.zip)")
-        if path:
-            self.begin(path)
+        if (self._closing_window or self._choosing_package
+                or self.session.state not in ("idle", "error", "ready")):
+            return
+        self._choosing_package = True
+        self._preferences_timer.stop()
+        self.import_button.setEnabled(False)
+        try:
+            path, _ = QFileDialog.getOpenFileName(self, "选择投屏组件包", "", "投屏组件 (*.zip)")
+        finally:
+            self._choosing_package = False
+        if self._closing_window:
+            return
+        if path and self.session.state in ("idle", "error", "ready"):
+            self._preferences_pending = False
+            if self.session.process is not None or self.session._preparing:
+                self._pending_archive = path
+                self._receive_after_stop = True
+                self.session.stop()
+            else:
+                self.begin(path)
+        else:
+            self.refresh(self.session.state, self.session.detail)
+            if path:
+                self.detail.setText("接收状态已变化，请关闭当前投屏后再导入组件包。")
+            elif self._preferences_pending:
+                self._preferences_timer.start()
 
     def open_link(self, link):
         if link == "folder":
@@ -786,6 +821,7 @@ class MirrorDialog(CardDialog):
     def reject(self):
         self._closing_window = True
         self._receive_after_stop = False
+        self._pending_archive = ""
         self._preferences_timer.stop()
         self.session.stop()
         super().reject()
@@ -793,6 +829,7 @@ class MirrorDialog(CardDialog):
     def closeEvent(self, event):
         self._closing_window = True
         self._receive_after_stop = False
+        self._pending_archive = ""
         self._preferences_timer.stop()
         self.session.stop()
         super().closeEvent(event)
