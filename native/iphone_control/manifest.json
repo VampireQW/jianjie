@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "component": "iphone-ble-hid",
+  "version": "0.1.2-experimental",
+  "protocol": "jsonl-v1",
+  "executable": "control.exe",
+  "sha256": "a545160f5653b2c29cf8415bb93476fa6feda21a118cb6af10012766af49fc41",
+  "bytes": 47104,
+  "architecture": "x64",
+  "runtime": "Windows system .NET Framework CLR v4",
+  "minimumWindowsBuild": 15063,
+  "experimental": true,
+  "sources": {
+    "HidExperiment.cs": "b23a86f2dcda4cd672310b691d348773e08093ba3696732f01bacd9ca437c3e5",
+    "PeerPinning.cs": "e43a652bc7b0b1e74bbdc451a0dfebb2d5536a35353e16fc96f5a9790f1adbe8",
+    "WinRtAwait.cs": "9ba27c9a82037125c7915ff5bb832c2906e7516f5ac1d9b04ca3df3b19582d7b",
+    "NotifyTransport.cs": "5cf8f6807d6c6d046af7e738124ca058deed93902992b325077aa34c17c7583d",
+    "experiment.manifest": "efad17e9f612684b799c73dbb528f3bd2b420692d987ff98c0d6401cde68b017"
+  }
+}

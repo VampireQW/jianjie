@@ -32,10 +32,10 @@ DEFAULT_SHOT_TOOL_KEYS = {"select": "V", "rect": "R", "ellipse": "O", "arrow": "
 # 固定键不进自定义卡（工具键已可自定义，动作键再开一档卡片价值低、键面冲突管理变复杂）
 # R152 尾加 keys=K：键盘钮（设置入口）也补单键，用户点名「整体统一」；叉/对贴 Esc/↩ 标签
 # （Enter/Esc 键路早已存在，只补标签不新增键路）；K 与工具键冲突时工具优先（同 R144 语义）
-DEFAULT_SHOT_ACT_KEYS = {"ocr": "X", "gif": "G", "rec": "C", "longshot": "L",
+DEFAULT_SHOT_ACT_KEYS = {"ocr": "X", "gif": "G", "rec": "C", "longshot": "L", "beautify": "F",
                          "save": "S", "pin": "B", "keys": "K"}
 SHOT_ACT_METHODS = {"ocr": "do_ocr", "rec": "start_rec", "gif": "start_gif",
-                    "longshot": "start_longshot", "save": "do_save", "pin": "do_pin",
+                    "longshot": "start_longshot", "beautify": "do_beautify", "save": "do_save", "pin": "do_pin",
                     "keys": "_open_keys_menu"}
 SHOT_ACT_LITE_SKIP = ("ocr", "rec")     # R107/R108 轻量版裁 OCR/录屏钮，键位同步裁
 # R102：聚光遮罩暗度循环档——空处单击逐级加深，满黑（255）后再点回到默认档（不关窗）
@@ -514,7 +514,7 @@ class AnnotationTextEdit(QTextEdit):
 class ShotOverlay(QWidget):
     """全屏覆盖层：先拖拽框选，再进入标注编辑。"""
     finished = Signal(object)   # QPixmap 裁剪结果（退出未完成时为 None）
-    pinned = Signal(QPixmap)    # 钉图
+    pinned = Signal(QPixmap, object, QPoint)    # 图像、来源屏幕、选区全局位置
     claimed = Signal(object)    # 多屏先到先得：本实例首次左键框选即接管（携带自身）
 
     def __init__(self, base_pixmap, ocr=False, scan=False, screen=None, pick=False, snap_windows=()):
@@ -2558,6 +2558,7 @@ class ShotOverlay(QWidget):
                  lucide="monitor-play")               # R131 截图态直通录屏（选区现成）
         _act("gif", "gif", "把选区录成 GIF 动图", self.start_gif)
         _act("longshot", "longshot", "长截图 · 选区进滚动拼接（条上可切双栏模式）", self.start_longshot)   # R105/R119
+        _act(None, "beautify", "美化 · 背景、留白、圆角、阴影与比例", self.do_beautify, lucide="palette")
         _b = tbtn("undo", "撤销 (Ctrl+Z)", self.undo)
         self._key_tips["act:undo"] = self._key_tip_for(_b, "^Z")
         _act("save", "save", "保存为 PNG", self.do_save)
@@ -2756,8 +2757,13 @@ class ShotOverlay(QWidget):
         if not self.sel:
             return
         pm = self.composite_crop()
-        self.pinned.emit(pm)
+        self.pinned.emit(pm, self.screen_, self.sel.topLeft() + self.screen_.geometry().topLeft())
         self.emit_done(pm, pinned=True)
+
+    def do_beautify(self):
+        if not self.sel:
+            return
+        self.emit_done(None, beautify=True)
 
     def do_ocr(self):
         """工具条直达：把当前选区送去文字识别。
@@ -2768,11 +2774,15 @@ class ShotOverlay(QWidget):
         self.hide()
         self.emit_done(pm, ocr=True)
 
-    def emit_done(self, pm, save_path=None, error=None, ocr=None, scan=None, pinned=False):
+    def emit_done(self, pm, save_path=None, error=None, ocr=None, scan=None, pinned=False, beautify=False):
+        document = None
+        if self.sel and not (self.ocr if ocr is None else ocr) and not (self.scan if scan is None else scan):
+            from screenshot_history import from_overlay
+            document = from_overlay(self)
         self.finished.emit({"pixmap": pm, "path": save_path,
                             "ocr": self.ocr if ocr is None else ocr,
                             "scan": self.scan if scan is None else scan,
-                            "error": error, "pinned": pinned})
+                            "error": error, "pinned": pinned, "document": document, "beautify": beautify})
         self._really_close()
 
     def close_cancel(self):
@@ -2811,32 +2821,157 @@ class ShotOverlay(QWidget):
 
 
 class PinnedWindow(QWidget):
-    """钉图：置顶悬浮窗，拖拽移动，双击关闭。"""
-    def __init__(self, pixmap):
+    """钉图：置顶悬浮窗，拖拽移动，边缘等比缩放，双击关闭。"""
+    EDGE = 7
+    _EDGE_CURSORS = {1: Qt.SizeHorCursor, 2: Qt.SizeHorCursor,
+                     4: Qt.SizeVerCursor, 8: Qt.SizeVerCursor,
+                     5: Qt.SizeFDiagCursor, 10: Qt.SizeFDiagCursor,
+                     6: Qt.SizeBDiagCursor, 9: Qt.SizeBDiagCursor}
+
+    def __init__(self, pixmap, screen=None, position=None):
         super().__init__(None)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.pm = pixmap
-        lbl = QLabel()
-        lbl.setPixmap(pixmap)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(1, 1, 1, 1)
-        lay.addWidget(lbl)
-        self.setStyleSheet("background:#111;border:1px solid rgba(255,255,255,60);border-radius:4px;")
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.pm = QPixmap(pixmap)
+        if screen not in QGuiApplication.screens():
+            screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            self.setScreen(screen)
+        # Source pixels already carry the capture DPR. Divide exactly once;
+        # a primary-screen HWND followed by adjustSize() can initially use
+        # the wrong scale on a secondary screen with a different DPI.
+        image_size = self.pm.deviceIndependentSize().toSize()
+        self.resize(max(1, image_size.width()) + 2, max(1, image_size.height()) + 2)
+        if screen is not None:
+            bounds = screen.availableGeometry()
+            if position is None:
+                point = bounds.center() - self.rect().center()
+            else:
+                point = QPoint(position) - QPoint(1, 1)
+            # Keep the origin on the selected display without shrinking the image.
+            point.setX(max(bounds.left(), min(point.x(), bounds.right() - self.width() + 1)))
+            point.setY(max(bounds.top(), min(point.y(), bounds.bottom() - self.height() + 1)))
+            self.move(point)
         self._drag = None
+        self._resize_drag = None
+        self._edge_cursor = None
+        self.setMouseTracking(True)
         C.prepare_capture_window(self)
         self.show()
-        self.adjustSize()
+
+    def paintEvent(self, ev):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#111111"))
+        natural = self.pm.deviceIndependentSize()
+        if not self.pm.isNull():
+            # Always paint from the original; repeated resizing must not
+            # accumulate blur or allocate another full-size image cache.
+            scale = min(max(1, self.width() - 2) / natural.width(),
+                        max(1, self.height() - 2) / natural.height())
+            painter.save()
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            painter.translate((self.width() - natural.width() * scale) / 2,
+                              (self.height() - natural.height() * scale) / 2)
+            painter.scale(scale, scale)
+            painter.drawPixmap(0, 0, self.pm)
+            painter.restore()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(.5, .5, -.5, -.5), 4, 4)
+        painter.end()
+
+    def _resize_edge(self, point):
+        if not self.rect().contains(point):
+            return 0
+        edge = min(self.EDGE, max(1, min(self.width(), self.height()) // 3))
+        direction = 0
+        if point.x() < edge:
+            direction |= 1
+        elif point.x() >= self.width() - edge:
+            direction |= 2
+        if point.y() < edge:
+            direction |= 4
+        elif point.y() >= self.height() - edge:
+            direction |= 8
+        return direction
+
+    def _set_edge_cursor(self, direction):
+        cursor = self._EDGE_CURSORS.get(direction)
+        if cursor == self._edge_cursor:
+            return  # setCursor can itself generate a mouse move on Windows.
+        self._edge_cursor = cursor
+        if cursor is None:
+            self.unsetCursor()
+        else:
+            self.setCursor(cursor)
+
+    def _resize_from_pointer(self, point):
+        direction, start, original = self._resize_drag
+        delta = point - start
+        natural = self.pm.deviceIndependentSize()
+        nw, nh = max(1., natural.width()), max(1., natural.height())
+        width, height = max(1, original.width() - 2), max(1, original.height() - 2)
+        horizontal, vertical = direction & 3, direction & 12
+        requested_w = width + (-delta.x() if direction & 1 else delta.x())
+        requested_h = height + (-delta.y() if direction & 4 else delta.y())
+        if horizontal and vertical:
+            # Project a corner drag onto the image's aspect-ratio diagonal.
+            scale = (nw * requested_w + nh * requested_h) / (nw * nw + nh * nh)
+        elif horizontal:
+            scale = requested_w / nw
+        else:
+            scale = requested_h / nh
+        minimum = min(1., 48. / max(nw, nh))
+        maximum = min((self.maximumWidth() - 2) / nw,
+                      (self.maximumHeight() - 2) / nh)
+        scale = min(maximum, max(minimum, scale))
+        width, height = max(1, round(nw * scale)) + 2, max(1, round(nh * scale)) + 2
+        if direction & 1:
+            x = original.x() + original.width() - width
+        elif direction & 2:
+            x = original.x()
+        else:
+            x = original.x() + round((original.width() - width) / 2)
+        if direction & 4:
+            y = original.y() + original.height() - height
+        elif direction & 8:
+            y = original.y()
+        else:
+            y = original.y() + round((original.height() - height) / 2)
+        self.setGeometry(x, y, width, height)
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
-            self._drag = ev.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            point = ev.globalPosition().toPoint()
+            direction = self._resize_edge(ev.position().toPoint())
+            if direction:
+                self._resize_drag = (direction, point, QRect(self.geometry()))
+                self._drag = None
+                self._set_edge_cursor(direction)
+            else:
+                self._drag = point - self.frameGeometry().topLeft()
+                self._resize_drag = None
+            ev.accept()
 
     def mouseMoveEvent(self, ev):
-        if self._drag:
+        if self._resize_drag is not None:
+            self._resize_from_pointer(ev.globalPosition().toPoint())
+        elif self._drag is not None:
             self.move(ev.globalPosition().toPoint() - self._drag)
+        else:
+            self._set_edge_cursor(self._resize_edge(ev.position().toPoint()))
 
     def mouseReleaseEvent(self, ev):
-        self._drag = None
+        if ev.button() == Qt.LeftButton:
+            self._drag = None
+            self._resize_drag = None
+            self._set_edge_cursor(self._resize_edge(self.mapFromGlobal(ev.globalPosition().toPoint())))
+
+    def leaveEvent(self, ev):
+        if self._drag is None and self._resize_drag is None:
+            self._set_edge_cursor(0)
+        super().leaveEvent(ev)
 
     def mouseDoubleClickEvent(self, ev):
         self.close()

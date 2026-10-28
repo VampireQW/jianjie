@@ -39,7 +39,7 @@ def validate_text(text):
 
 
 class ExchangeStore:
-    LIMIT = 5
+    LIMIT = 9
     TTL = 30 * 60
 
     def __init__(self, directory, on_change=None, archive_dir=None, history_path=None):

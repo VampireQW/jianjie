@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListWidget,
 
 import common as C
 import widgets as W
+from polished_controls import CrispLineEdit, crisp_window_shadow
 import search_native as N
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -1075,9 +1076,6 @@ QMenu::item{background:transparent;color:#eef1f7;padding:8px 28px 8px 14px;
 border-radius:7px;font-size:12.5px;}
 QMenu::item:selected{background:#3b82f6;color:#ffffff;}
 QMenu::item:disabled{color:#6b7280;}
-QLineEdit#srch{background:rgba(255,255,255,8);border:1px solid rgba(255,255,255,28);
-border-radius:10px;padding:9px 14px;font-size:13.5px;}
-QLineEdit#srch:focus{border:1px solid rgba(96,165,250,160);}
 QPushButton#reidx{background:rgba(59,130,246,48);color:#a9c8ff;
 border:none;border-radius:6px;padding:8px 16px;font-size:12.5px;font-weight:600;}
 QPushButton#reidx:hover{background:rgba(59,130,246,80);color:#dbeafe;}
@@ -1276,6 +1274,7 @@ class FileSearchWindow(QWidget):
         self.resize(700, 540)
         # R146 mac 化：统一黑透插件壳（标题栏/钉×/拖动/Esc/八向缩放）
         root, _sub = W._plugin_shell(self, "文件搜索", min_size=(420, 320))
+        crisp_window_shadow(self, root.parentWidget())
         self.setStyleSheet(W.PLUGIN_QSS + FSEARCH_QSS)   # 追加结果列表/右键菜单精修
         self.db = db or db_path()
         self._worker = None
@@ -1292,13 +1291,15 @@ class FileSearchWindow(QWidget):
         root.setSpacing(8)
 
         top = QHBoxLayout()
-        self.edit = QLineEdit()
+        self.edit = CrispLineEdit()
+        self.edit.setMinimumHeight(40)
         self.edit.setObjectName("srch")
         self.edit.setPlaceholderText("搜索文件或文件夹（空格分隔多个关键词）")
         self.edit.setClearButtonEnabled(True)   # 框内一键清除（点击触发 textChanged 走正常重查）
         self.edit.textChanged.connect(self._on_edit)
         top.addWidget(self.edit, 1)
         self.refresh = QPushButton("重新索引")
+        self.refresh.setFixedHeight(40)
         self.refresh.setObjectName("reidx")
         self.refresh.setCursor(Qt.PointingHandCursor)
         self.refresh.clicked.connect(lambda: self.reindex(force=True))

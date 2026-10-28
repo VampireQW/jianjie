@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 APP_NAME = "简截"
 APP_VERSION = "4.13.7-win.1"
-APP_BUILD_ID = "R272"
+APP_BUILD_ID = "R292"
 
 # ---------- 系统剪贴板（Win32 文件引用 / 静态图片） ----------
 _CF_HDROP = 15
@@ -765,10 +765,16 @@ def force_foreground(widget):
     后台进程的 activateWindow 受 Windows 前台锁拦截（只闪任务栏不拿焦点，Esc 无处可去）；
     全局热键使本进程短暂持有前台权限，此时补 SetForegroundWindow 才能成功。
     ShotOverlay._activate_selection 同款；框选覆盖层一直有效，三条此前漏接。"""
-    if sys.platform != "win32":
+    if sys.platform != "win32" or QGuiApplication.platformName() != 'windows':
         return
     try:
-        ctypes.windll.user32.SetForegroundWindow(ctypes.c_void_p(int(widget.winId())))
+        handle = ctypes.c_void_p(int(widget.winId()))
+        user = ctypes.windll.user32
+        # A hidden STARTUPINFO can suppress the first normal window even
+        # though Qt has already marked it visible. Honor Qt's explicit intent.
+        if widget.isVisible() and not user.IsWindowVisible(handle):
+            user.ShowWindow(handle, 5)  # SW_SHOW preserves the requested window state.
+        user.SetForegroundWindow(handle)
     except Exception:
         pass
 

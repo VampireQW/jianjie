@@ -79,6 +79,7 @@ def build():
     source=generated/'uxplay.cpp'
     source.write_text(patched_source(),encoding='utf-8')
     video = runpy.run_path(str(Path(__file__).with_name('windows_video.py')))
+    discovery = runpy.run_path(str(Path(__file__).with_name('windows_discovery.py')))
     env=os.environ.copy()
     env['ZIG_GLOBAL_CACHE_DIR']=str(ROOT/'build/native-toolchain/cache')
     env['ZIG_LOCAL_CACHE_DIR']=str(WORK/'zig-cache')
@@ -100,7 +101,7 @@ def build():
             replacement.write_text(ntp_patched)
             file = replacement
         elif file.name == 'mdnsd.c':
-            mdns_patched = file.read_text().replace(
+            mdns_patched = discovery['patch_mdns'](file.read_text()).replace(
                 '    unsigned char ttl = 255;\n    unsigned char loop = 1;',
                 '    DWORD ttl = 255;\n    DWORD loop = 1;', 1)
             old = '    setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, (const char *) &ttl, sizeof(ttl));'
@@ -145,7 +146,7 @@ def build():
     resource.write_text('101 ICON "_app.ico"\n', encoding='ascii')
     resource_binary = generated/'receiver.res'
     subprocess.run([str(ZIG),'rc','/fo',str(resource_binary),str(resource)],cwd=generated,check=True,env=env)
-    command=[str(ZIG),'c++',*flags,'-std=c++11','-s',str(source),*objects,str(resource_binary),'-L',str(SDK/'lib'),*[str(SDK/'lib'/('lib'+name+'.dll.a')) for name in libraries],'-lws2_32','-liphlpapi','-lshell32','-luser32','-o',str(output/'receiver.exe')]
+    command=[str(ZIG),'c++',*flags,'-std=c++11','-s',str(source),*objects,str(resource_binary),'-L',str(SDK/'lib'),*[str(SDK/'lib'/('lib'+name+'.dll.a')) for name in libraries],'-lws2_32','-liphlpapi','-lshell32','-luser32','-ldxguid','-o',str(output/'receiver.exe')]
     subprocess.run(command,check=True,env=env)
     with zipfile.ZipFile(output/'source.zip','w',zipfile.ZIP_DEFLATED) as z:
         for file in UPSTREAM.rglob('*'):
@@ -159,7 +160,7 @@ def build():
         z.write(__file__,'native/airplay/build.py')
         z.write(ROOT/'_app.ico','_app.ico')
         z.write(resource,'native/airplay/receiver.rc')
-        for name in ('fetch_deps.py','dependencies.json','BUILD.md','windows_video.py'):
+        for name in ('fetch_deps.py','dependencies.json','BUILD.md','windows_video.py','windows_discovery.py','video_stats.c','display_latency.c'):
             z.write(Path(__file__).with_name(name),'native/airplay/'+name)
     (output/'LICENSE').write_bytes((UPSTREAM/'LICENSE').read_bytes())
     exe=output/'receiver.exe'

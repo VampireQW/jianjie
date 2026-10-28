@@ -15,6 +15,12 @@ iPhone 快捷指令入口使用 [简截互传2 路径版本](https://www.icloud.
 按固定版本下载并校验。涉及 GStreamer、GLib、OpenSSL、libplist、FFmpeg 等组件，
 各组件的许可及对应源码以其上游项目和原发布包说明为准。
 
+## iPhone 电脑控制组件
+
+蓝牙 HID helper 的源码、重建脚本与构建清单位于 `native/iphone_control/`。
+运行时使用 Windows 系统自带 .NET Framework 与蓝牙 API，无需下载第三方蓝牙驱动。
+此组件与 AirPlay 接收器独立运行，不改变上述 AirPlay 组件的许可要求。
+
 ## Lucide / Feather 图标
 
 `icons.py` 中的部分 SVG 图标来自 [Lucide](https://github.com/lucide-icons/lucide)。以下保留其[许可声明](https://github.com/lucide-icons/lucide/blob/main/LICENSE)。这些声明适用于相应图标，不代表简截整个项目采用相同许可。

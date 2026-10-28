@@ -7,12 +7,13 @@
 （同一份对象字典、同一个绘制函数），完成＝全分辨率渲染落盘并回调主流程进剪贴板。
 坐标约定：标注对象全部存「图坐标」；画布只按 k=显示/图 缩放呈现，导出零缩放逐像素。"""
 import math
+import time
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer
-from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QIcon,
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QIcon, QKeySequence,
                            QImage, QPainter, QPainterPath, QPen, QPixmap, QTextCursor)
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
-                               QVBoxLayout, QWidget)
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 import capture
 import common as C
@@ -38,11 +39,20 @@ def _clone_stamp(s):
 class LongCanvas(QWidget):
     """长图画布：整图按宽缩放显示（超高滚动），鼠标事件换算成图坐标进出。"""
 
+    changed = Signal()
+
     def __init__(self, arr, view_w):
         super().__init__(None)
-        h, w = arr.shape[:2]
+        if isinstance(arr, QImage):
+            w, h = arr.width(), arr.height()
+            self._base = (arr.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+                          if arr.format() in (QImage.Format_Indexed8, QImage.Format_Mono, QImage.Format_MonoLSB)
+                          else QImage(arr))
+            self._base.setDevicePixelRatio(1.)
+        else:
+            h, w = arr.shape[:2]
+            self._base = QImage(arr.data, w, h, 3 * w, QImage.Format_RGB888).copy()
         self._img_w, self._img_h = w, h
-        self._base = QImage(arr.data, w, h, 3 * w, QImage.Format_RGB888).copy()
         self._s = min(4.0, max(0.8, w / 1080.0))       # 粗细/字号/网格随图宽等比（1080 基准同截图）
         self._k = min(1.0, max(0.05, (view_w - 48) / max(w, 1)))
         self.setFixedSize(round(w * self._k), round(h * self._k))
@@ -51,6 +61,13 @@ class LongCanvas(QWidget):
         # 先缩放 RGB 底稿，只转换预览尺寸，避免额外生成全尺寸 QPixmap。
         self._base_pm = QPixmap.fromImage(self._base.scaled(
             self.width(), self.height(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        self._base_preview = QImage()
+        self._view_preview = False
+        self._view_beauty = None
+        self._view_offset = QPointF()
+        self._view_bounds = QRectF(0, 0, w, h)
+        self._render_bounds = None
+        self._mosaic_preview = QImage()
         self.sel = QRect(0, 0, self.width(), self.height())   # 复用 _fit_anno_editor 的边界
         self.setFocusPolicy(Qt.ClickFocus)
         self.setMouseTracking(True)   # R76：悬浮 hover 光标前提——不开此项 Qt 只在按住键时才发 move 事件
@@ -83,6 +100,49 @@ class LongCanvas(QWidget):
         self._drag_off = None
         self._drag_moved = False
         self._rs = None                               # 选中标注的 8 向缩放会话
+
+    def set_view_scale(self, scale, preview=False, beauty=None):
+        import beautify
+        settings = beautify.normalize(beauty) if beauty is not None else None
+        size, image_rect = beautify.geometry(self._img_w, self._img_h, settings or {})
+        scale = max(.00001, float(scale))
+        width, height = max(1, round(size.width()*scale)), max(1, round(size.height()*scale))
+        if math.isclose(scale, self._k, rel_tol=1e-6) and preview == self._view_preview and settings == self._view_beauty:
+            return
+        previous = self._k
+        old_offset = QPointF(self._view_offset)
+        old_preview = self._view_preview
+        if settings != self._view_beauty:
+            self._mosaic_preview = QImage()
+            self._mosa_cache = None
+        self._k = scale
+        self._view_preview = preview
+        self._view_beauty = settings
+        self._view_offset = image_rect.topLeft()
+        self._view_bounds = QRectF(-image_rect.x(), -image_rect.y(), size.width(), size.height())
+        self.clearMask()
+        self.setFixedSize(width, height)
+        self.sel = QRect(0, 0, width, height)
+        if preview:
+            if self._base_preview.isNull():
+                self._base_preview = (self._base.scaled(1200, 1200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                                      if max(self._img_w, self._img_h) > 1200 else QImage(self._base))
+            source = self._base_preview
+        else:
+            source = self._base
+        image_size = QSize(max(1, round(self._img_w*scale)), max(1, round(self._img_h*scale)))
+        if self._base_pm.size() != image_size or old_preview != preview:
+            self._base_pm = QPixmap.fromImage(source.scaled(image_size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        for editor in (self.text_editor, self.text_edit):
+            if editor is not None:
+                x, y = editor.x()/previous-old_offset.x(), editor.y()/previous-old_offset.y()
+                editor.move(self._to_view(QPointF(x, y)))
+                fontsize = max(9, round(editor._fs_img*scale))
+                editor.setFont(QFont('Microsoft YaHei UI', fontsize, QFont.Bold))
+                editor.setStyleSheet("QTextEdit{background:transparent;border:none;padding:0px;color:%s;"
+                                     "font-family:'Microsoft YaHei UI';font-size:%dpt;font-weight:bold;}" % (editor._color, fontsize))
+                self._fit_anno_editor(editor)
+        self.update()
 
     # ---- 对象化交互借用截图侧（类体绑定：方法内 self 多态解析到本类属性与覆写）----
     _seg_dist = capture.ShotOverlay._seg_dist
@@ -303,7 +363,7 @@ class LongCanvas(QWidget):
     def _high_dim_rect(self):
         """R121：压暗覆盖范围＝整图（图坐标）。capture 版用全屏部件尺寸，
         长图导出无 scale 时只盖左上角——本覆写让显示与导出共用整图范围。"""
-        return QRect(0, 0, self._img_w, self._img_h)
+        return (self._render_bounds or self._view_bounds).toAlignedRect()
 
     # R121 聚光并集原语委托（LongCanvas 非继承 ShotOverlay，方法级借用须逐个委托；
     # _paint_high_dim 内部按 self 回调 _fill_high_dim/_high_dim_rect，缺一不可）
@@ -345,7 +405,12 @@ class LongCanvas(QWidget):
 
     # ---- 坐标换算 ----
     def _to_img(self, pos):
-        return QPoint(round(pos.x() / self._k), round(pos.y() / self._k))
+        return QPoint(round(pos.x()/self._k-self._view_offset.x()),
+                      round(pos.y()/self._k-self._view_offset.y()))
+
+    def _to_view(self, pos):
+        return QPoint(round((pos.x()+self._view_offset.x())*self._k),
+                      round((pos.y()+self._view_offset.y())*self._k))
 
     # ---- 马赛克（笔刷化：与截图侧同款算法，坐标换图坐标） ----
     def _mosaic_bs(self):
@@ -362,6 +427,16 @@ class LongCanvas(QWidget):
         ——此前逐采样点取格，一划只有点线，用户要来回涂很多次才盖住一片。
         增量缓存：拖动中每次只算新段。"""
         bs, img = self._mosaic_bs(), self._base
+        sx = sy = 1.
+        ox = oy = 0.
+        if self._view_beauty is not None:
+            if self._mosaic_preview.isNull():
+                import beautify
+                self._mosaic_preview = beautify.render(self._base_preview, self._view_beauty,
+                                                       max_side=1200, original_size=QSize(self._img_w, self._img_h))
+            img = self._mosaic_preview
+            sx, sy = img.width()/self._view_bounds.width(), img.height()/self._view_bounds.height()
+            ox, oy = self._view_offset.x(), self._view_offset.y()
         rad = self._mosaic_brush_r()
         cache = self._mosa_cache
         if cache is not None and cache[0] == id(pts) and cache[1] <= len(pts):
@@ -372,7 +447,7 @@ class LongCanvas(QWidget):
             return out
         half = bs / 2.0
         r2 = rad * rad
-        iw, ih = self._img_w, self._img_h
+        iw, ih = img.width(), img.height()
 
         def emit(px, py):
             for ty in range(int(math.floor((py - rad) / bs)) * bs,
@@ -386,11 +461,13 @@ class LongCanvas(QWidget):
                     if dx * dx + dy * dy > r2:
                         continue
                     seen.add((tx, ty))
-                    x0 = min(max(tx, 0), max(iw - 1, 0))
-                    y0 = min(max(ty, 0), max(ih - 1, 0))
+                    x0 = min(max(math.floor((tx+ox)*sx), 0), max(iw-1, 0))
+                    y0 = min(max(math.floor((ty+oy)*sy), 0), max(ih-1, 0))
+                    x1 = max(x0+1, min(iw, math.ceil((tx+bs+ox)*sx)))
+                    y1 = max(y0+1, min(ih, math.ceil((ty+bs+oy)*sy)))
                     r = g = b = n = 0
-                    for yy in range(y0, min(y0 + bs, ih)):
-                        for xx in range(x0, min(x0 + bs, iw)):
+                    for yy in range(y0, y1):
+                        for xx in range(x0, x1):
                             c = img.pixelColor(xx, yy)
                             r += c.red()
                             g += c.green()
@@ -452,9 +529,15 @@ class LongCanvas(QWidget):
     def paintEvent(self, ev):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        p.drawPixmap(0, 0, self._base_pm)      # R86：底图设备坐标 1:1 blit（零采样，Qt 只拷可见区）
         p.save()
-        p.scale(self._k, self._k)              # 标注层仍走图坐标
+        if self._view_beauty is not None:
+            import beautify
+            p.scale(self._k, self._k)
+            beautify.paint(p, self._base_pm, self._view_beauty, QSize(self._img_w, self._img_h))
+            p.translate(self._view_offset)
+        else:
+            p.drawPixmap(0, 0, self._base_pm)
+            p.scale(self._k, self._k)
         for _i, s in enumerate(self.stamps):
             if _i == self._text_edit_idx and s["kind"] == "text":
                 continue                          # 再编辑中：浮层在画，底层这帧让位（R79 防重影）
@@ -696,8 +779,9 @@ class LongCanvas(QWidget):
         # fs/color 缺省＝当前工具值；双击再编辑传入原对象值（同截图侧 _reedit_text：保真不跳样）
         fs_img = max(12, round((12 + self.cur_size) * self._s)) if fs is None else fs
         color = self.cur_color if color is None else color
-        dx = max(0, min(img_pos.x() * self._k, self.width() - 60))
-        dy = max(0, min(img_pos.y() * self._k, self.height() - 30))
+        point = self._to_view(img_pos)
+        dx = max(0, min(point.x(), self.width() - 60))
+        dy = max(0, min(point.y(), self.height() - 30))
         t = capture.ShotOverlay._wysiwyg_editor(self, QPoint(round(dx), round(dy)),
                                                 max(9, round(fs_img * self._k)), color)
         t._fs_img, t._color = fs_img, color
@@ -775,8 +859,9 @@ class LongCanvas(QWidget):
                            "color": self.cur_color, "r": self.num_radius()})
         n = self._nums[-1]
         fs_img = max(12, round((12 + self.cur_size) * self._s))
-        dx = max(0, min(img_pos.x() * self._k + n["r"] * self._k + 6, self.width() - 60))
-        dy = max(0, min(img_pos.y() * self._k - 12, self.height() - 30))
+        point = self._to_view(img_pos)
+        dx = max(0, min(point.x() + n["r"] * self._k + 6, self.width() - 60))
+        dy = max(0, min(point.y() - 12, self.height() - 30))
         t = capture.ShotOverlay._wysiwyg_editor(self, QPoint(round(dx), round(dy)),
                                                 max(9, round(fs_img * self._k)), self.cur_color)
         t._fs_img, t._color = fs_img, self.cur_color
@@ -801,8 +886,9 @@ class LongCanvas(QWidget):
         tx = n["pt"].x() + n.get("tdx", round(r + 6 / self._k))
         ty = n["pt"].y() + n.get("tdy", round(-12 / self._k))
         fs_img = max(12, r)
-        dx = max(0, min(tx * self._k, self.width() - 60))
-        dy = max(0, min(ty * self._k, self.height() - 30))
+        point = self._to_view(QPoint(tx, ty))
+        dx = max(0, min(point.x(), self.width() - 60))
+        dy = max(0, min(point.y(), self.height() - 30))
         t = capture.ShotOverlay._wysiwyg_editor(self, QPoint(round(dx), round(dy)),
                                                 max(9, round(fs_img * self._k)), n["color"])
         t._fs_img, t._color = fs_img, n["color"]
@@ -895,6 +981,7 @@ class LongCanvas(QWidget):
             self.undo_stack.pop(0)
         self.undo_stack.append(self._snapshot())
         self.redo_stack.clear()
+        self.changed.emit()
 
     def undo(self):
         if self.text_editor or self.text_edit:
@@ -907,6 +994,7 @@ class LongCanvas(QWidget):
             self._nums = [self._clone_num(n) for n in nums]
             self.undo_stack.pop()         # 同截图侧：先恢复栈顶快照再弹出（先弹后恢会多退一级）
             self.update()
+            self.changed.emit()
 
     def redo(self):
         if self.redo_stack:
@@ -915,6 +1003,7 @@ class LongCanvas(QWidget):
             self.stamps = [_clone_stamp(s) for s in snaps]
             self._nums = [self._clone_num(n) for n in nums]
             self.update()
+            self.changed.emit()
 
     # ---- 键盘 ----
     def keyPressEvent(self, ev):
@@ -933,29 +1022,59 @@ class LongCanvas(QWidget):
         super().keyPressEvent(ev)
 
     # ---- 导出 ----
-    def render_final(self):
+    def render_final(self, max_side=None, beauty=None):
         """全分辨率渲染：底图 + 标注 + 序号层走同一份绘制代码，零缩放逐像素。"""
-        img = QImage(self._base)
+        import beautify
+        settings = beautify.normalize(beauty)
+        size, rect = beautify.geometry(self._img_w, self._img_h, settings)
+        if settings['enabled'] and not max_side and size.width()*size.height() > beautify.MAX_OUTPUT_PIXELS:
+            raise ValueError('美化后的图片过大，请减少留白或改为自动比例。')
+        factor = min(1., max_side/max(size.width(), size.height())) if max_side else 1.
+        if factor < 1. or settings['enabled']:
+            img = QImage(max(1, round(size.width()*factor)), max(1, round(size.height()*factor)), QImage.Format_ARGB32_Premultiplied)
+            img.fill(Qt.transparent)
+        else:
+            img = QImage(self._base)
+        if img.isNull():
+            raise OSError('图片所需内存不足，请减少留白或改为自动比例。')
         p = QPainter(img)
         p.setRenderHint(QPainter.Antialiasing, True)
-        for s in self.stamps:
-            if s["kind"] == "high":
-                continue                          # R121：聚光并集统一渲染（同 paintEvent）
-            capture.ShotOverlay._paint_shape(self, p, s)
-        self._paint_high_dim(p, self.stamps)
-        for s in self.stamps:
-            if s["kind"] == "high":
-                self._draw_high_border(p, s["r"], s.get("shape", "rect"))
-        if self._nums:
-            self._paint_nums(p)
-        p.end()
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        previous = self._render_bounds
+        self._render_bounds = QRectF(-rect.x(), -rect.y(), size.width(), size.height())
+        try:
+            p.scale(factor, factor)
+            if settings['enabled']:
+                beautify.paint(p, self._base, settings)
+                p.translate(rect.topLeft())
+            elif factor < 1.:
+                p.drawImage(QRectF(0, 0, self._img_w, self._img_h), self._base)
+            for s in self.stamps:
+                if s['kind'] != 'high':
+                    capture.ShotOverlay._paint_shape(self, p, s)
+            self._paint_high_dim(p, self.stamps)
+            for s in self.stamps:
+                if s['kind'] == 'high':
+                    self._draw_high_border(p, s['r'], s.get('shape', 'rect'))
+            if self._nums:
+                self._paint_nums(p)
+        finally:
+            self._render_bounds = previous
+            p.end()
         return img
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() in (QEvent.MouseButtonRelease, QEvent.KeyRelease):
+            self.changed.emit()
+        return result
 
 
 class LongEditor(QWidget):
     """长截图编辑器窗口：单行工具条（工具/撤销重做/颜色/粗细/取消完成），下方滚动画布。"""
 
-    def __init__(self, arr, frames=0, on_done=None, on_cancel=None, save_dir=None, topmost=False):
+    def __init__(self, arr, frames=0, on_done=None, on_cancel=None, save_dir=None, topmost=False,
+                 document=None, beauty=False):
         super().__init__(None)
         C.snapshot_input_locale()   # R83：前台若非我们则刷新记录的用户输入法语言
         self.setWindowTitle("长截图编辑 · 简截 — 滚轮翻页 · 拖动即画 · 文字点哪儿写哪儿")
@@ -968,17 +1087,71 @@ class LongEditor(QWidget):
         self._on_cancel = on_cancel
         self._save_dir = save_dir
         self._done = False
+        self._history_store = None
+        self._on_history = None
+        self._last_document_state = None
+        self._history_saved_at = 0
+        self._beauty_mode = False
 
-        scr = QGuiApplication.primaryScreen().availableGeometry()
-        vw = max(880, min(980, scr.width() - 80))   # 下限＝主工具条（工具钮＋动作钮）舒适容纳宽
-        vh = max(360, min(680, scr.height() - 120))
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        self.setScreen(screen)
+        scr = screen.availableGeometry()
+        vw = max(640, min(1080, scr.width() - 64))
+        vh = max(400, min(760, scr.height() - 64))
         self.resize(vw, vh)
+        self.move(scr.center()-self.rect().center())
 
         self.canvas = LongCanvas(arr, vw)
+        self._plain_scale = self.canvas._k
+        import beautify
+        import screenshot_history as history
+        self._document = document or history.new_document(self.canvas._base, 'longshot' if frames else 'image')
+        self.canvas.stamps = [self.canvas._clone_entry(s) for s in self._document.get('stamps', [])]
+        self.canvas._nums = [self.canvas._clone_num(n) for n in self._document.get('nums', [])]
+        for key, value in self._document.get('options', {}).items():
+            if key in history.OPTION_KEYS:
+                setattr(self.canvas, key, value)
+        self.canvas.undo_stack = [self.canvas._snapshot()]
+        self.beauty_settings = beautify.normalize(self._document.get('beauty') or C.load_settings().get('screenshot_beauty'))
+        if not document:
+            self.beauty_settings['enabled'] = False
+        if document is not None or not frames:
+            self.setWindowTitle('截图编辑 · 简截')
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(700)
+        self._save_timer.timeout.connect(self._save_document)
+        self.canvas.changed.connect(self._schedule_save)
         self._right_cancel = C.CaptureRightCancel(self, self._cancel_like_escape)
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(6)
+
+        modes = QHBoxLayout()
+        self.b_annotate = QPushButton('原图')
+        self.b_annotate.setToolTip('原图视图 · 美化视图中也可直接标注')
+        self.b_beauty = QPushButton('美化')
+        self.b_beauty.setToolTip('美化（'+capture.DEFAULT_SHOT_ACT_KEYS['beautify']+'）· 调整画布并直接添加标注')
+        for button in (self.b_annotate, self.b_beauty):
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet('QPushButton{background:transparent;border:1px solid transparent;border-radius:7px;padding:7px 16px;color:#a8b4c8;}'
+                                'QPushButton:hover{background:#242c3b;color:#f1f5fb;}'
+                                'QPushButton:checked{background:#233859;border-color:#42638c;color:#bfdbfe;}'
+                                'QPushButton:focus{border-color:#60a5fa;}')
+            modes.addWidget(button)
+        self.b_annotate.setChecked(True)
+        self.b_annotate.clicked.connect(lambda: self._set_mode(False))
+        self.b_beauty.clicked.connect(lambda: self._set_mode(True))
+        modes.addStretch()
+        self.history_state = QLabel('原图与标注分开保留')
+        self.history_state.setStyleSheet(f'color:{C.UI_TEXT2};font-size:11px;')
+        modes.addWidget(self.history_state)
+        self.b_history = QPushButton('截图历史')
+        self.b_history.setEnabled(False)
+        self.b_history.clicked.connect(lambda: self._on_history() if self._on_history else None)
+        modes.addWidget(self.b_history)
+        root.addLayout(modes)
 
         row1 = QHBoxLayout()
         row1.setSpacing(4)
@@ -1000,7 +1173,7 @@ class LongEditor(QWidget):
         # （复用截图侧 capture.ToolPropsPop，同一底色 QSS）——主工具条只留工具/动作，
         # 贴身属性钮范式退役（同步截图侧 R134 改造：用户点名选项「都应该出现在下方的辐条上」）
         row1.addStretch(1)
-        row1.addWidget(icons.tool_button("close", "放弃编辑", self.cancel, color="#f4645f"))
+        row1.addWidget(icons.tool_button("close", "关闭编辑 · 修改保留在截图历史", self.cancel, color="#f4645f"))
         self.b_save = icons.tool_button("save", "保存到本地目录", lambda: self.finish(copy=False),
                                        color="#60a5fa")
         row1.addWidget(self.b_save)
@@ -1032,9 +1205,29 @@ class LongEditor(QWidget):
         sa.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         sa.setStyleSheet("QScrollArea{border:1px solid rgba(255,255,255,22);border-radius:8px;"
                          "background:rgba(0,0,0,120);}")
-        root.addWidget(sa, 1)
+        self._annotation_view = sa
+        self._canvas_stack = QStackedWidget()
+        self._canvas_stack.addWidget(sa)
+        self.beauty_preview = beautify.BeautyPreview()
+        self._canvas_stack.addWidget(self.beauty_preview)
+        self.beauty_panel = beautify.BeautyPanel(self.beauty_settings)
+        self.beauty_panel.changed.connect(self._beauty_changed)
+        self._beauty_scroll = QScrollArea()
+        self._beauty_scroll.setWidgetResizable(True)
+        self._beauty_scroll.setFixedWidth(264)
+        self._beauty_scroll.setWidget(self.beauty_panel)
+        self._beauty_scroll.setStyleSheet('QScrollArea{border:none;}')
+        self._beauty_scroll.hide()
+        content = QHBoxLayout()
+        content.setSpacing(0)
+        content.addWidget(self._canvas_stack, 1)
+        content.addWidget(self._beauty_scroll)
+        root.addLayout(content, 1)
+        if beauty:
+            self._set_mode(True)
         C.prepare_capture_window(self)
         self.show()
+        C.force_foreground(self)
         if topmost:                              # 同级置顶拼 z 序：后激活者在上，提起压过历史窗
             self.raise_()
             self.activateWindow()
@@ -1044,6 +1237,106 @@ class LongEditor(QWidget):
         f.setFixedSize(1, 18)
         f.setStyleSheet("background:rgba(255,255,255,28);border:none;")
         return f
+
+    def attach_history(self, store, on_history):
+        if self._history_store is not None:
+            return
+        self._history_store, self._on_history = store, on_history
+        store.mark_open(self._document['id'])
+        store.changed.connect(self._history_changed)
+        store.failed.connect(self._history_failed)
+        self.b_history.setEnabled(True)
+        self._save_document()
+
+    def _schedule_save(self):
+        if not self._done and self._history_store is not None:
+            self._save_timer.start()
+
+    def _save_document(self, force=False):
+        if self._history_store is None or self.canvas._base.isNull():
+            return
+        if not force and (self.canvas.text_editor is not None or self.canvas.text_edit is not None):
+            return  # An autosave must never commit or disturb IME composition.
+        import json
+        import beautify
+        import screenshot_history as history
+        document = history.from_canvas(self.canvas, self._document, self.beauty_settings)
+        document['frames'] = self._frames
+        state = json.dumps(history.encode({key: value for key, value in document.items() if key != 'base'}), ensure_ascii=False, sort_keys=True)
+        if state == self._last_document_state:
+            return
+        try:
+            preview = self.canvas.render_final(max_side=360, beauty=self.beauty_settings)
+            self._history_store.save(document, preview)
+            self._document = document
+            self._last_document_state = state
+            self._history_saved_at = time.time()
+            self.history_state.setText('正在保存到截图历史…')
+            settings = C.load_settings()
+            remembered = {**self.beauty_settings, 'enabled': False}
+            if settings.get('screenshot_beauty') != remembered:
+                settings['screenshot_beauty'] = remembered
+                C.save_settings(settings)
+        except (OSError, ValueError, TypeError) as error:
+            self._history_store.failed.emit('截图历史未保存 · '+str(error))
+
+    def _history_changed(self):
+        if self._history_store is not None:
+            for item in self._history_store.records():
+                if item['id'] == self._document['id'] and item.get('updated', 0) >= self._history_saved_at - .1:
+                    self.history_state.setText('已自动保存到截图历史')
+                    break
+
+    def _history_failed(self, message):
+        self._last_document_state = None
+        self.history_state.setText('历史保存失败，原图仍可复制或另存')
+        self.history_state.setToolTip(message)
+
+    def _set_mode(self, beauty):
+        self.canvas.commit_text_editor()
+        self.canvas.commit_text_input()
+        self._beauty_mode = bool(beauty)
+        self.b_annotate.setChecked(not beauty)
+        self.b_beauty.setChecked(beauty)
+        self._beauty_scroll.setVisible(beauty)
+        if beauty:
+            if not getattr(self, '_beauty_visited', False):
+                self._beauty_visited = True
+                if not self.beauty_settings['enabled']:
+                    self.beauty_panel.enabled.setChecked(True)
+            self.beauty_preview.set_settings(self.beauty_settings)
+            if self._annotation_view.widget() is self.canvas:
+                self._annotation_view.takeWidget()
+                self.beauty_preview.set_canvas(self.canvas)
+        elif self.beauty_preview._canvas is self.canvas:
+            self.beauty_preview.release_canvas()
+            self.canvas.set_view_scale(self._plain_scale)
+            self._annotation_view.setWidget(self.canvas)
+            self.canvas.show()
+        self._canvas_stack.setCurrentIndex(1 if beauty else 0)
+        if self.canvas.cur_tool in capture.ShotOverlay._PROPS_TOOLS:
+            self.props_pop.set_tool(self.canvas.cur_tool)
+            self.props_pop.show()
+        else:
+            self.props_pop.hide()
+        self._update_output_size()
+        self._schedule_save()
+        self.canvas.setFocus(Qt.OtherFocusReason)
+
+    def _beauty_changed(self, settings):
+        self.beauty_settings = dict(settings)
+        self.beauty_preview.set_settings(settings)
+        self._update_output_size()
+        self._schedule_save()
+
+    def _update_output_size(self):
+        import beautify
+        size, _ = beautify.geometry(self.canvas._img_w, self.canvas._img_h, self.beauty_settings)
+        too_large = self.beauty_settings['enabled'] and size.width()*size.height() > beautify.MAX_OUTPUT_PIXELS
+        self.beauty_panel.dimensions.setText(f'输出 {size.width()} × {size.height()} px\n'+
+                                           ('尺寸过大，请减少留白或使用自动比例' if too_large else '原图分辨率保留，背景与标注一同导出'))
+        self.b_save.setEnabled(not too_large)
+        self.b_finish.setEnabled(not too_large)
 
     def set_tool(self, kind):
         self.canvas.commit_text_editor()
@@ -1059,6 +1352,7 @@ class LongEditor(QWidget):
                 self.props_pop.show()
             else:
                 self.props_pop.hide()
+        self.canvas.setFocus(Qt.OtherFocusReason)
 
     def set_color(self, c):
         self.canvas.cur_color = c
@@ -1160,11 +1454,23 @@ class LongEditor(QWidget):
             return
         self.canvas.commit_text_editor()
         self.canvas.commit_text_input()   # 序号附言未确认也落字，保证不丢
-        img = self.canvas.render_final()
+        import beautify
+        size, _ = beautify.geometry(self.canvas._img_w, self.canvas._img_h, self.beauty_settings)
+        if self.beauty_settings['enabled'] and size.width()*size.height() > beautify.MAX_OUTPUT_PIXELS:
+            self._status.setText('美化后的图片过大，请减少留白或改为自动比例。')
+            self._status.show()
+            return
+        try:
+            img = self.canvas.render_final(beauty=self.beauty_settings)
+        except (OSError, ValueError) as error:
+            self._status.setText(str(error))
+            self._status.show()
+            return
         path = None
         if not copy:
             try:
-                path = "{}\\长截图_{}.png".format(self._save_dir or pictures_dir(), timestamp())
+                prefix = '长截图' if self._frames else '截图'
+                path = "{}\\{}_{}.png".format(self._save_dir or pictures_dir(), prefix, timestamp())
                 C.save_image(img, path)
             except OSError:
                 self._status.setText("保存失败，请检查存放位置后重试；编辑内容已保留")
@@ -1174,18 +1480,40 @@ class LongEditor(QWidget):
             self._status.setText("复制失败，请再点对号重试；编辑内容已保留")
             self._status.show()
             return
+        self._save_document(force=True)
         self._done = True
         self.close()
 
     def cancel(self):
+        self.canvas.commit_text_editor()
+        self.canvas.commit_text_input()
+        self._save_document(force=True)
         self._done = True
         self.close()
         if self._on_cancel:
             self._on_cancel()
 
     def closeEvent(self, ev):
+        if not self._done:
+            self.canvas.commit_text_editor()
+            self.canvas.commit_text_input()
+            self._save_document(force=True)
+        self._save_timer.stop()
+        if self._history_store is not None:
+            self._history_store.mark_closed(self._document['id'])
+        self.canvas._base = QImage()
+        self.canvas._base_pm = QPixmap()
+        self.canvas._base_preview = QImage()
+        self.canvas._mosaic_preview = QImage()
+        self.canvas.stamps.clear()
+        self.canvas._nums.clear()
+        self.canvas.undo_stack.clear()
+        self.canvas.redo_stack.clear()
+        self.beauty_preview.image = QImage()
+        self.beauty_preview.release_canvas()
+        self._document['base'] = QImage()
         if not self._done and self._on_cancel:
-            self._on_cancel()             # 右上角 × ＝放弃编辑
+            self._on_cancel()             # 关闭编辑，修改已保存为历史草稿
         super().closeEvent(ev)
 
     def _cancel_like_escape(self):
@@ -1199,6 +1527,13 @@ class LongEditor(QWidget):
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Escape:
             self._cancel_like_escape()
+            return
+        if (not self.canvas.text_editor and not self.canvas.text_edit
+                and not ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)
+                and QKeySequence(ev.key()).toString().upper() == capture.DEFAULT_SHOT_ACT_KEYS['beautify']):
+            if not ev.isAutoRepeat():
+                self._set_mode(True)
+            ev.accept()
             return
         if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
             if not ev.isAutoRepeat():

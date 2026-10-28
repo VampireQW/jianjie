@@ -946,36 +946,74 @@ class Controller(QObject):
     def toast(self, msg, kind="info"):
         self._toast.show_msg(msg)          # 屏上浮出，2.4s 自动消失
 
-    def notify_shot(self, pm, title, sub, img):
+    def notify_shot(self, pm, title, sub, img, document_id=None):
         """截图/长截图完成通知：原图可直接传入，只为缩略图创建 QPixmap。"""
-        self._shot_notify.show_shot(pm, title, sub, lambda: self._open_image_editor(img),
+        edit = (lambda: self.edit_screenshot(document_id)) if document_id else (lambda: self._open_image_editor(img))
+        self._shot_notify.show_shot(pm, title, sub, edit,
                                     lambda: self._send_exchange_image(img))
 
     def _open_image_editor(self, img, topmost=False):
         """R154 抽取共用（_clip_edit_img 同路径）：QImage → LongEditor 同套标注工具；
         落盘走临时目录用完即删不污染图片目录，交付仍走 long_finished（复制+新通知卡）。"""
-        import numpy as _np
-        im = img.convertToFormat(QImage.Format_RGB888)
-        # im 在编辑器构造结束前存活；LongCanvas 会复制其底稿，不持有此视图。
-        arr = _np.frombuffer(im.constBits(), dtype=_np.uint8).reshape(im.height(), im.bytesPerLine())
-        arr = _np.ascontiguousarray(arr[:, :im.width() * 3].reshape(im.height(), im.width(), 3))
         self._track_long_editor(LongEditor(
-            arr, frames=0, on_done=self.long_finished,
+            img, frames=0, on_done=self.long_finished,
             on_cancel=lambda: None, topmost=topmost))
 
     def _track_long_editor(self, editor):
         """关闭后销毁编辑窗及其整图缓存；失败重试期间仍保留窗口。"""
+        editor._on_done = lambda path, frames, copy=True, image=None: self.long_finished(
+            path, frames, copy=copy, image=image, document_id=editor._document['id'])
+        editors = getattr(self, '_screenshot_editors', None)
+        if editors is None:
+            editors = self._screenshot_editors = {}
+        identifier = editor._document['id']
+        editors[identifier] = editor
         generation = object()
         self._long_editor_generation = generation
         self._long_editor = editor
         editor.setAttribute(Qt.WA_DeleteOnClose, True)
 
         def forget(_object=None):
+            if editors.get(identifier) is editor:
+                editors.pop(identifier, None)
             if self._long_editor_generation is generation:
                 self._long_editor = None
                 self._long_editor_generation = None
 
         editor.destroyed.connect(forget)
+        try:
+            editor.attach_history(self._get_screenshot_store(), self.screenshot_history)
+        except Exception as error:
+            self.toast('截图历史暂不可用 · '+str(error))
+
+    def _present_screenshot_editor(self, editor):
+        """Present after the capture window has relinquished its native activation."""
+        editor.setAttribute(Qt.WA_ShowWithoutActivating, False)
+        editor.showNormal()
+        editor.raise_()
+        editor.activateWindow()
+        C.force_foreground(editor)
+
+    def _beauty_open_stage(self, phase, editor=None, error=None):
+        trace = getattr(self, '_beauty_open_trace', None)
+        if trace is None or phase == 'queued':
+            trace = self._beauty_open_trace = dict(build=C.APP_BUILD_ID, pid=os.getpid(), started=time.time(), stages=[])
+        item = dict(phase=phase, elapsedMs=round((time.time()-trace['started'])*1000))
+        if editor is not None:
+            item.update(visible=editor.isVisible(), active=editor.isActiveWindow(), minimized=editor.isMinimized())
+            if QGuiApplication.platformName() == 'windows':
+                item['nativeVisible'] = bool(ctypes.windll.user32.IsWindowVisible(ctypes.c_void_p(int(editor.winId()))))
+        trace['stages'].append(item)
+        trace['stages'] = trace['stages'][-12:]
+        if error is not None:
+            import traceback
+            trace['error'] = ''.join(traceback.format_exception(type(error), error, error.__traceback__))[-6000:]
+        if phase in ('presented', 'failed'):
+            try:
+                import storage
+                storage.atomic_json(os.path.join(tempfile.gettempdir(), 'JianJieBeautyOpen-'+C.APP_BUILD_ID+'.json'), trace)
+            except OSError:
+                pass
 
     def iphone_mirror(self, arg=""):
         from iphone_mirror import MirrorDialog, MirrorSession
@@ -1012,6 +1050,7 @@ class Controller(QObject):
         def open_tool():
             self.dispatch(meth, arg)
             attributes = {"phone_receive": "_phone_dialog", "iphone_mirror": "_mirror_dialog",
+                          "screenshot_history": "_screenshot_history_window",
                           "settings": "_settings_dialog", "clip": "_clip_win", "calendar": "_cal",
                           "todo": "_todo", "notes": "_notes",
                           "pomodoro": "_pomo", "fsearch": "_fswin", "netspeed": "_netspeed_w"}
@@ -1076,18 +1115,44 @@ class Controller(QObject):
             QTimer.singleShot(160, do)
 
     def shot_finished(self, result):
+        deferred = False
         try:
-            self._complete_shot(result)
+            deferred = bool(self._complete_shot(result))
         finally:
-            self._finish_panel_capture()
+            if not deferred:
+                self._finish_panel_capture()
 
     def _complete_shot(self, result):
         close_all(self.shot_overlays)              # 多屏组清理（跳过已删败者：炸了 start_gif 就永远轮不到）
         self.shot_overlays = None
         if not result:
             return
+        document = result.get('document')
+        if result.get('beautify') and document is not None:
+            self._beauty_open_stage('queued')
+            def open_after_capture():
+                try:
+                    self._beauty_open_stage('creating')
+                    self._open_document_editor(document, beauty=True)
+                except Exception as error:
+                    self._beauty_open_stage('failed', error=error)
+                    try:
+                        self._get_screenshot_store().save(document, document['base'])
+                        self.toast('美化窗口未打开，截图已保留在截图历史 · '+str(error))
+                    except Exception:
+                        self.toast('美化窗口未打开 · '+str(error))
+                finally:
+                    self._finish_panel_capture()
+            QTimer.singleShot(0, open_after_capture)
+            return True
         pm = result["pixmap"]
         path = result.get("path")
+        if document is not None and pm is not None:
+            try:
+                self._get_screenshot_store().save(document, pm.toImage())
+            except (OSError, ValueError) as error:
+                self.toast('截图历史未保存 · '+str(error))
+        document_id = document['id'] if document is not None else None
         if result.get("error"):
             # 保存失败不丢图：自动转入剪贴板
             if pm:
@@ -1107,12 +1172,12 @@ class Controller(QObject):
         if result.get("ocr"):
             self.ocr_dialog(pm)
         elif result.get("pinned"):
-            self.notify_shot(pm, "截图完成", "已钉到屏幕", pm.toImage())
+            self.notify_shot(pm, "截图完成", "已钉到屏幕", pm.toImage(), document_id=document_id)
         elif path:
             _sub = f"已保存 · {os.path.basename(path)}"
-            self.notify_shot(pm, "截图完成", _sub, pm.toImage())        # R154 缩略图卡整合保存提示
+            self.notify_shot(pm, "截图完成", _sub, pm.toImage(), document_id=document_id)
         else:
-            self.notify_shot(pm, "截图完成", "已复制到剪贴板", pm.toImage())   # R154 缩略图卡
+            self.notify_shot(pm, "截图完成", "已复制到剪贴板", pm.toImage(), document_id=document_id)
 
     # ---- GIF 录制 ----
     def start_gif(self, sel, scr):
@@ -1484,7 +1549,7 @@ class Controller(QObject):
         else:
             cb(None, None)
 
-    def long_finished(self, path, frames, copy=True, image=None):
+    def long_finished(self, path, frames, copy=True, image=None, document_id=None):
         # copy=True（对号/编辑器路径）：图片直接进剪贴板（Ctrl+V 即贴图）；
         # copy=False（⬇ 下载钮）：纯落盘不碰剪贴板。
         # Windows 写入完整 CF_DIB，避免跨进程读取依赖 Qt/OLE 的延迟呈现。
@@ -1511,7 +1576,7 @@ class Controller(QObject):
         if img is None:
             img = QImage(path)
         if not img.isNull():
-            self.notify_shot(img, f"长截图完成 · {frames} 屏", _sub, img)
+            self.notify_shot(img, f"长截图完成 · {frames} 屏" if frames else '截图完成', _sub, img, document_id=document_id)
         else:
             self.toast(f"长截图完成 · {frames} 屏 · {_sub} · {path}")   # 图读取失败兜底纯文字
         self.long_bar = None
@@ -1578,8 +1643,68 @@ class Controller(QObject):
             self.toast(f"色值 {hexs} 已复制 · 直接粘贴即用")
 
     # ---- 钉图 ----
-    def pin_pixmap(self, pm):
-        win = PinnedWindow(pm)
+    def _get_screenshot_store(self):
+        store = getattr(self, '_screenshot_store', None)
+        if store is None:
+            from screenshot_history import HistoryStore
+            store = HistoryStore(self)
+            store.failed.connect(self.toast)
+            self._screenshot_store = store
+            QApplication.instance().aboutToQuit.connect(self._shutdown_screenshot_history)
+        return store
+
+    def _shutdown_screenshot_history(self):
+        for editor in tuple(getattr(self, '_screenshot_editors', {}).values()):
+            try:
+                editor.close()
+            except RuntimeError:
+                pass
+        store = getattr(self, '_screenshot_store', None)
+        if store is not None:
+            store.shutdown()
+
+    def screenshot_history(self, arg=''):
+        from screenshot_history import HistoryWindow
+        self._show_tool_window('_screenshot_history_window', lambda: HistoryWindow(
+            self._get_screenshot_store(), self._open_document_editor))
+
+    def _open_document_editor(self, document, beauty=False):
+        existing = getattr(self, '_screenshot_editors', {}).get(document['id'])
+        if existing is not None:
+            try:
+                if beauty:
+                    existing._set_mode(True)
+                self.panel.launch_session.track(existing)
+                self._present_screenshot_editor(existing)
+                return
+            except RuntimeError:
+                pass
+        editor = LongEditor(document['base'], frames=document.get('frames', 0),
+                            document=document, beauty=beauty,
+                            on_done=self.long_finished, on_cancel=lambda: None)
+        self._track_long_editor(editor)
+        self.panel.launch_session.track(editor)
+        self._present_screenshot_editor(editor)
+        if beauty:
+            self._beauty_open_stage('created', editor)
+        def settle():
+            try:
+                if editor.isVisible() and not editor.isMinimized():
+                    self._present_screenshot_editor(editor)
+                    if beauty:
+                        self._beauty_open_stage('presented', editor)
+            except RuntimeError:
+                pass
+        QTimer.singleShot(16, settle)
+
+    def edit_screenshot(self, identifier):
+        try:
+            self._open_document_editor(self._get_screenshot_store().load(identifier))
+        except (OSError, ValueError, KeyError) as error:
+            self.toast('无法继续编辑 · '+str(error))
+
+    def pin_pixmap(self, pm, screen=None, position=None):
+        win = PinnedWindow(pm, screen, position)
         generation = object()
         self._pin_generation = generation
         self.pin_win = win
@@ -2435,6 +2560,13 @@ def smoke():
     app = QApplication.instance() or QApplication(sys.argv)
     C.apply_ui_font(app)                             # R130 全局字体栈（与真机同源，冒烟可锁）
     S = C.load_settings()
+    # The smoke profile owns its output directories; Windows known folders may
+    # be unavailable even when their stale redirected paths still exist.
+    S["save_dir"] = os.path.join(os.environ["APPDATA"], "output")
+    S["receive_dir"] = os.path.join(os.environ["APPDATA"], "received")
+    os.makedirs(S["save_dir"], exist_ok=True)
+    os.makedirs(S["receive_dir"], exist_ok=True)
+    C.save_settings(S)
     tray = QSystemTrayIcon(C.app_qicon())
     panel = Panel(S)
     ctl = Controller(tray, panel, S)

@@ -21,17 +21,18 @@ HTML = r'''<!doctype html>
 </details>
 <label class="content-label" for="text">发送内容 · 支持拖入文件</label><textarea id="text" placeholder="输入或粘贴文字，也可以选择图片、文件" rows="3"></textarea>
 <section class="image-area" aria-label="待发送图片">
-  <div id="empty"><svg viewBox="0 0 48 48" aria-hidden="true"><rect x="6" y="6" width="36" height="36" rx="4"/><circle cx="18" cy="17" r="3"/><path d="m8 35 11-11 8 8 6-6 8 9"/></svg><p>选择要发送的图片</p><span>JPEG / PNG · 单张最大 32 MiB</span></div>
+  <div id="empty"><svg viewBox="0 0 48 48" aria-hidden="true"><rect x="6" y="6" width="36" height="36" rx="4"/><circle cx="18" cy="17" r="3"/><path d="m8 35 11-11 8 8 6-6 8 9"/></svg><p>选择要发送的图片</p><span>最多 9 张 · JPEG / PNG · 单张最大 32 MiB</span></div>
   <img id="preview" alt="待发送图片预览" hidden>
 </section>
 <div class="file-info"><span id="filename">尚未选择图片或文件</span><span id="filesize"></span></div>
+<ol id="selection-list" class="selection-list" aria-label="已选图片或文件" hidden></ol>
 <input id="any-file" type="file" multiple hidden>
-<input id="file" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden>
-<div class="compose-actions"><button id="choose" type="button">选择一张图片</button><button id="choose-file" type="button">选择文件</button><button id="remove-image" type="button" hidden>移除</button></div>
+<input id="file" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" multiple hidden>
+<div class="compose-actions"><button id="choose" type="button">选择图片（最多 9 张）</button><button id="choose-file" type="button">选择文件</button><button id="remove-image" type="button" hidden>移除</button></div>
 <div class="status-box" role="status" aria-live="polite"><p id="status">正在确认连接…</p><progress id="progress" max="100" value="0" hidden aria-label="文件上传进度"></progress></div>
 <footer><button id="send" type="button" disabled>发送到电脑</button><button id="cancel-send" type="button" hidden>取消发送</button><p>仅在你的局域网内传输</p></footer>
-<section class="recent" aria-label="最近互传"><div class="recent-heading"><h2>最近互传</h2><span>最近 5 条 · 30 分钟</span></div><p id="receive-status" role="status">正在获取记录…</p><div id="records"></div></section>
-<details><summary>连接或发送遇到问题？</summary><p>两台设备需处于可互通的同一局域网，电脑上的简截需保持“简捷互传已开启”。微信内无法选择图片时，请用浏览器打开，或展开上方“添加到手机桌面”复制配对链接。</p><p>修改了用户名或密码，请重新扫描电脑上的二维码。清理浏览器网站数据也会清除配对。高像素照片按原分辨率发送，单张最大 32 MiB。图片和文字可在支持粘贴的应用中使用；文件可在资源管理器中粘贴保存，也可在电脑的简捷互传记录中点“保存”。文件最大 2 GiB；临时记录保留 30 分钟，请及时保存。</p></details>
+<section class="recent" aria-label="最近互传"><div class="recent-heading"><h2>最近互传</h2><span>最近 9 条 · 30 分钟</span></div><p id="receive-status" role="status">正在获取记录…</p><div id="records"></div></section>
+<details><summary>连接或发送遇到问题？</summary><p>两台设备需处于可互通的同一局域网，电脑上的简截需保持“简捷互传已开启”。微信内无法选择图片时，请用浏览器打开，或展开上方“添加到手机桌面”复制配对链接。</p><p>修改了用户名或密码，请重新扫描电脑上的二维码。清理浏览器网站数据也会清除配对。一次最多选择 9 张 JPEG / PNG，高像素照片按原分辨率发送，单张最大 32 MiB。图片和文字可在支持粘贴的应用中使用；文件可在资源管理器中粘贴保存，也可在电脑的简捷互传记录中点“保存”。文件最大 2 GiB；临时记录保留 30 分钟，请及时保存。</p></details>
 <noscript><p>请用支持 JavaScript 的手机浏览器打开此页面。</p></noscript>
 
 <dialog id="image-copy-dialog"><div class="copy-heading"><strong>复制图片</strong><button id="close-copy" type="button" aria-label="关闭图片" title="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><p id="copy-tip">长按下方原图，在手机菜单中选择“复制”。</p><img id="copy-original" alt="长按复制原图"></dialog>
@@ -82,6 +83,12 @@ textarea:focus{outline:2px solid var(--accent);outline-offset:2px}textarea::plac
 
 CSS += r'''
 .record-actions{display:flex;gap:var(--space-2)}.record-actions button{flex:1;min-width:0}
+.selection-list{list-style:none;padding:0;margin:var(--space-3) 0;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.selection-list button{width:auto;min-height:44px}
+.selection-list li{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-2);background:var(--surface)}.selection-list li+li{border-top:1px solid var(--border)}
+.selection-list .selection-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;font-size:12px}
+.selection-list button.selection-name{padding:var(--space-2);background:transparent;border-color:transparent}.selection-list button[aria-pressed=true]{color:var(--accent);background:var(--soft)}
+.selection-size{flex:none;color:var(--muted);font-size:12px}.selection-remove{flex:none;min-width:44px;padding:var(--space-2);font-size:12px}
 .record strong{display:block;overflow-wrap:anywhere;margin-top:var(--space-2)}
 dialog{width:calc(100% - 32px);max-width:760px;max-height:85vh;padding:var(--space-4);background:var(--surface);color:var(--text);border:1px solid var(--control);border-radius:var(--radius);overflow:auto}
 dialog::backdrop{background:var(--bg);opacity:.9}.copy-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3)}dialog p{font-size:14px;line-height:1.7}dialog img{display:block;width:100%;height:auto;object-fit:contain}
@@ -93,18 +100,54 @@ JS = r'''(() => {
 const el = id => document.getElementById(id);
 const file = el("file"), choose = el("choose"), send = el("send"), preview = el("preview"), status = el("status"), progress = el("progress");
 const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_IMAGES = 9;
 let activeUpload = null;
 let selectedFiles = [];
 let selectedKind = "image";
-let token = "", selected = null, previewUrl = "", busy = false, paired = false, generation = 0;
+let token = "", selected = null, previewUrl = "", previewFile = null, busy = false, selecting = false, paired = false, generation = 0;
 const storageKey = "jianjie-phone-token";
 const isWeChat = /MicroMessenger/i.test(navigator.userAgent);
 el("computer").textContent = location.host;
 function message(text, tone = "normal") { status.textContent = text; status.dataset.tone = tone; }
-function controls() { choose.disabled = busy || !paired; el("choose-file").disabled = busy || !paired; send.disabled = busy || !paired || (!selected && !el("text").value.trim()); el("copy-pair").disabled = busy || !paired; el("forget").disabled = busy || !token; el("text").disabled = busy; el("remove-image").disabled = busy; }
+function controls() { const locked=busy||selecting; choose.disabled = locked || !paired; el("choose-file").disabled = locked || !paired; send.disabled = locked || !paired || (!selected && !el("text").value.trim()); el("copy-pair").disabled = locked || !paired; el("forget").disabled = locked || !token; el("text").disabled = locked; el("remove-image").disabled = locked; for(const button of el("selection-list").querySelectorAll("button")) button.disabled=locked; }
 function cancelPair(force = false) { const rejected = token; token = ""; paired = false; for(const storage of ["localStorage","sessionStorage"]) { try { if(force || window[storage].getItem(storageKey) === rejected) window[storage].removeItem(storageKey); } catch(_) {} } el("pair-link").value = ""; el("pair-state").textContent = "未配对"; history.replaceState(null, "", location.pathname); controls(); }
 function rememberPair() { let saved = false; try { localStorage.setItem(storageKey, token); saved = localStorage.getItem(storageKey) === token; } catch(_) {} try { sessionStorage.setItem(storageKey, token); } catch(_) {} el("pair-state").textContent = saved ? "已记住此电脑" : "仅本次配对"; el("pair-link").value = location.origin + "/android#token=" + token; if(saved && !isWeChat) history.replaceState(null, "", location.pathname); return saved; }
-function clearSelection() { selected = null; selectedFiles = []; if(previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = ""; preview.hidden = true; preview.removeAttribute("src"); el("empty").hidden = false; el("filename").textContent = "尚未选择图片或文件"; el("filesize").textContent = ""; choose.textContent = "选择一张图片"; el("text").hidden = false; el("remove-image").hidden = true; controls(); }
+function clearPreview() { preview.onload=null; preview.onerror=null; preview.hidden=true; preview.removeAttribute("src"); if(previewUrl) URL.revokeObjectURL(previewUrl); previewUrl=""; previewFile=null; el("empty").hidden=false; }
+function clearSelection() { selected = null; selectedFiles = []; clearPreview(); el("selection-list").replaceChildren(); el("selection-list").hidden=true; el("filename").textContent = "尚未选择图片或文件"; el("filesize").textContent = ""; choose.textContent = "选择图片（最多 9 张）"; el("text").hidden = false; el("remove-image").hidden = true; send.textContent="发送到电脑"; controls(); }
+function selectionLabel(count=selectedFiles.length, kind=selectedKind) { return count+(kind==="image" ? " 张图片" : " 个文件"); }
+function renderSelection() {
+  selected=selectedFiles[0]||null;
+  const list=el("selection-list"); list.replaceChildren(); list.hidden=selectedFiles.length<2;
+  if(!selected) return;
+  el("filename").textContent=selectedFiles.length>1 ? "已选择 "+selectionLabel() : selected.name;
+  el("filesize").textContent=(selectedFiles.reduce((n,f)=>n+f.size,0)/1048576).toFixed(2)+" MiB";
+  el("text").hidden=true; el("remove-image").hidden=false;
+  el("remove-image").textContent=selectedFiles.length>1 ? "清空已选" : "移除";
+  choose.textContent=selectedKind==="image" ? "更换图片（最多 9 张）" : "选择图片（最多 9 张）";
+  selectedFiles.forEach((item,index)=>{
+    const row=node("li"), name=node(selectedKind==="image" ? "button" : "span",(index+1)+". "+item.name,"selection-name");
+    name.title=item.name;
+    if(selectedKind==="image") { name.type="button"; name.setAttribute("aria-pressed",String(item===previewFile)); name.onclick=()=>{if(!busy&&!selecting)showPreview(item);}; }
+    const remove=node("button","移除","selection-remove"); remove.type="button"; remove.setAttribute("aria-label","移除 "+item.name); remove.onclick=()=>removeSelected(index);
+    row.append(name,node("span",(item.size/1048576).toFixed(2)+" MiB","selection-size"),remove); list.append(row);
+  });
+  controls();
+}
+function showPreview(item) {
+  clearPreview(); previewFile=item;
+  const url=previewUrl=URL.createObjectURL(item);
+  preview.onload=()=>{if(previewUrl===url){preview.hidden=false;el("empty").hidden=true;}};
+  preview.onerror=()=>{if(previewUrl===url){preview.hidden=true;message("“"+item.name+"”无法预览，可以尝试发送，或移除后重新选择。","error");}};
+  preview.src=url; renderSelection();
+}
+function removeSelected(index) {
+  if(busy||selecting) return;
+  ++generation;
+  const removed=selectedFiles.splice(index,1)[0];
+  if(!selectedFiles.length){clearSelection();message("请输入文字，或选择图片、文件。");return;}
+  if(selectedKind==="image"&&removed===previewFile) showPreview(selectedFiles[0]); else renderSelection();
+  send.textContent="发送 "+selectionLabel(); message("已选择 "+selectionLabel()+"，将按顺序发送。");
+}
 try {
   const fresh = new URLSearchParams(location.hash.slice(1)).get("token");
   if(fresh && /^[a-f0-9]{64}$/.test(fresh)) token = fresh;
@@ -119,50 +162,29 @@ el("copy-pair").addEventListener("click", async () => {
   setTimeout(() => { button.textContent = "复制配对链接"; }, 2500);
 });
 choose.addEventListener("click", () => { file.value = ""; file.click(); });
-file.addEventListener("change", async () => {
-  selectContent(file.files[0], false);
-});
+file.addEventListener("change", () => selectFiles(Array.from(file.files), false));
 el("choose-file").addEventListener("click",()=>{el("any-file").value="";el("any-file").click();});
 el("any-file").addEventListener("change",()=>selectFiles(Array.from(el("any-file").files)));
-async function selectFiles(files) {
-  if(!files.length || busy) return;
-  if(files.length > 5) { message("一次最多选择 5 个文件，临时记录保留最近 5 条。", "error"); return; }
-  if(files.some(f => !f.size || f.size > MAX_FILE_BYTES)) { message("请选择非空文件，每个最大 2 GiB。", "error"); return; }
-  await selectContent(files[0], true);
-  if(selected !== files[0]) return;
-  selectedFiles = files;
-  if(files.length > 1) {
-    el("filename").textContent = files.length+" 个文件 · "+files.map(f=>f.name).join("、");
-    el("filesize").textContent = (files.reduce((n,f)=>n+f.size,0)/1048576).toFixed(2)+" MiB";
-    message("已选择 "+files.length+" 个文件，将按顺序发送。");
-  }
-}
-async function selectContent(next, generic) {
-  if(!next || busy) return;
-  selectedKind = generic ? "file" : "image";
-  const current = ++generation; clearSelection();
-  if(next.size === 0 || next.size > (generic ? MAX_FILE_BYTES : 32 * 1024 * 1024)) { message(generic ? "请选择非空文件，单个最大 2 GiB。" : "请选择非空图片，单张最大 32 MiB。", "error"); return; }
-  if(generic) {
-    selected=next; el("text").value=""; el("text").hidden=true; el("remove-image").hidden=false;
-    el("filename").textContent=next.name;el("filesize").textContent=(next.size/1048576).toFixed(2)+" MiB";
-    controls();message("文件已就绪，点击下方发送。");return;
-  }
+async function selectFiles(files, generic=true) {
+  if(!files.length || busy || selecting || !paired) return;
+  if(files.length > (generic ? 5 : MAX_IMAGES)) { message(generic ? "一次最多选择 5 个文件。" : "一次最多选择 9 张图片。", "error"); return; }
+  if(files.some(f => !f.size || f.size > (generic ? MAX_FILE_BYTES : 32*1024*1024))) { message(generic ? "请选择非空文件，每个最大 2 GiB。" : "请选择非空图片，单张最大 32 MiB。", "error"); return; }
+  const current=++generation; selecting=true; controls();
+  message(generic ? "正在准备文件…" : "正在读取所选图片…");
   try {
-    const bytes = new Uint8Array(await next.slice(0, 16).arrayBuffer());
-    if(current !== generation) return;
-    const jpeg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
-    const png = [137,80,78,71,13,10,26,10].every((v,i) => bytes[i] === v);
-    if(!jpeg && !png) { message("请选择 JPEG 或 PNG 图片；其他格式请先转换。", "error"); return; }
-    previewUrl = URL.createObjectURL(next);
-    preview.onload = () => {
+    if(!generic) for(const next of files) {
+      const bytes = new Uint8Array(await next.slice(0, 16).arrayBuffer());
       if(current !== generation) return;
-      selected = next; el("text").value = ""; el("text").hidden = true; el("remove-image").hidden = false; preview.hidden = false; el("empty").hidden = true;
-      el("filename").textContent = next.name; el("filesize").textContent = (next.size / 1048576).toFixed(2) + " MiB";
-      choose.textContent = "更换图片"; message("图片已就绪，点击下方发送。", "normal"); send.textContent = "发送到电脑"; controls();
-    };
-    preview.onerror = () => { if(current === generation) { clearSelection(); message("图片无法预览，请换一张 JPEG 或 PNG。", "error"); } };
-    preview.src = previewUrl;
-  } catch(_) { if(current === generation) message("图片读取失败，请重新选择。", "error"); }
+      const jpeg = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+      const png = [137,80,78,71,13,10,26,10].every((v,i) => bytes[i] === v);
+      if(!jpeg && !png) throw new Error("“"+next.name+"”不是 JPEG 或 PNG 图片，请转换后再选择。");
+    }
+    if(current !== generation) return;
+    clearSelection(); selectedKind=generic ? "file" : "image"; selectedFiles=files.slice(); selected=selectedFiles[0]; el("text").value="";
+    if(generic) renderSelection(); else showPreview(selected);
+    send.textContent="发送 "+selectionLabel(); message("已选择 "+selectionLabel()+"，将按顺序发送。");
+  } catch(error) { if(current===generation) message(error.message||"内容读取失败，请重新选择。", "error"); }
+  finally { if(current===generation){selecting=false;controls();} }
 }
 document.querySelector("main").addEventListener("dragover", event => {
   if(event.dataTransfer && Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
@@ -172,18 +194,21 @@ document.querySelector("main").addEventListener("drop", event => {
   event.preventDefault();
   if(!paired) { message("请先打开电脑提供的配对链接。", "error"); return; }
   if(busy) { message("正在发送，请完成或取消后再拖入文件。"); return; }
-  selectFiles(Array.from(event.dataTransfer.files));
+  const files=Array.from(event.dataTransfer.files);
+  const imagesOnly=files.every(item=>/^image\/(jpeg|png)$/i.test(item.type)||/\.(jpe?g|png)$/i.test(item.name));
+  selectFiles(files, !imagesOnly);
 });
 el("cancel-send").onclick = () => { if(activeUpload) activeUpload.abort(); };
 send.addEventListener("click", () => {
-  if((!selected && !el("text").value.trim()) || busy || !paired) return;
+  if((!selected && !el("text").value.trim()) || busy || selecting || !paired) return;
   if(!selected && new TextEncoder().encode(el("text").value).length > 65536){ message("文字最多 64 KiB，请分段发送。", "error"); return; }
   const uploads = selectedFiles.length ? selectedFiles.slice() : [selected];
-  let completed = 0;
+  const batchKind=selectedKind, totalBytes=uploads.reduce((n,item)=>n+(item ? item.size : 0),0);
+  let completed = 0, completedBytes=0;
   busy = true; controls(); progress.hidden = false; progress.value = 0;
   send.textContent = "正在发送…"; message("正在发送，请保持此页面打开。");
   function uploadNext(index) {
-  const selected = uploads[index], isImage = !!selected, isFile = isImage && selectedKind === "file";
+  const upload = uploads[index], isImage = !!upload, isFile = isImage && batchKind === "file";
   const xhr = new XMLHttpRequest(); activeUpload = xhr;
   // 文件不设总时长限制；60 秒无上传进度或确认才终止，允许慢速局域网。
   xhr.timeout = isFile ? 0 : 300000;
@@ -194,13 +219,15 @@ send.addEventListener("click", () => {
   xhr.upload.addEventListener("progress", event => {
     watch();
     if(isImage && event.lengthComputable) {
-      progress.value = event.loaded / event.total * 100;
+      const percent=Math.min(100,event.loaded/event.total*100);
+      progress.value = totalBytes ? (completedBytes+Math.min(upload.size,event.loaded))/totalBytes*100 : percent;
       const elapsed = Math.max((performance.now()-started)/1000, .1);
       const speed = event.loaded/elapsed, remaining = Math.max(0, Math.ceil((event.total-event.loaded)/Math.max(speed,1)));
       const rate = speed >= 1048576 ? (speed/1048576).toFixed(1)+" MiB/s" : (speed/1024).toFixed(0)+" KiB/s";
       const eta = remaining >= 60 ? Math.ceil(remaining/60)+" 分钟" : remaining+" 秒";
-      message(progress.value >= 100 ? "内容已上传，正在等待电脑确认…" :
-        (uploads.length>1 ? "文件 "+(index+1)+"/"+uploads.length+" · " : "")+"正在发送 "+Math.round(progress.value)+"% · "+rate+" · 约剩 "+eta);
+      const prefix=uploads.length>1 ? (isFile ? "文件 " : "图片 ")+(index+1)+"/"+uploads.length+" · " : "";
+      message(prefix+(percent >= 100 ? "已上传，正在等待电脑确认…" :
+        "正在发送 "+Math.round(percent)+"% · "+rate+" · 约剩 "+eta));
     }
   });
   xhr.upload.addEventListener("load", watch);
@@ -208,11 +235,16 @@ send.addEventListener("click", () => {
     if(finished) return; finished = true; clearTimeout(idleTimer); activeUpload = null;
     if(tone === "success") {
       ++completed;
-      if(index+1 < uploads.length) { progress.value=0; uploadNext(index+1); return; }
-      if(uploads.length>1) text="已发送 "+completed+" 个文件，请在电脑查看接收记录。";
-    } else if(uploads.length>1) text="已发送 "+completed+"/"+uploads.length+" 个文件。"+text;
+      completedBytes+=upload ? upload.size : 0;
+      if(index+1 < uploads.length) { uploadNext(index+1); return; }
+      if(uploads.length>1) text="已发送 "+selectionLabel(completed,batchKind)+"，请在电脑查看接收记录。";
+    } else if(uploads.length>1) text="已发送 "+completed+"/"+uploads.length+(batchKind==="image" ? " 张图片。" : " 个文件。")+text;
     busy = false; progress.hidden = true; el("cancel-send").hidden = true;
-    send.textContent = tone === "success" ? "再次发送" : "重新发送"; message(text, tone); controls();
+    if(tone!=="success"&&completed&&upload){
+      selectedFiles=uploads.slice(index);
+      if(batchKind==="image"&&!selectedFiles.includes(previewFile)) showPreview(selectedFiles[0]); else renderSelection();
+    }
+    send.textContent = tone === "success" ? "再次发送" : (completed&&upload ? "继续发送剩余 "+selectionLabel() : "重新发送"); message(text, tone); controls();
   };
   xhr.onload = () => {
     let response = {}; try { response = JSON.parse(xhr.responseText); } catch(_) {}
@@ -224,9 +256,9 @@ send.addEventListener("click", () => {
   xhr.onabort = () => finish(stalled ? "60 秒没有传输进度或确认，请检查网络后重试。" : "已取消发送；若上传已完成，请检查电脑接收记录。", "error");
   xhr.open("POST", isImage ? (isFile ? "/exchange/file" : "/android/image") : "/exchange/text");
   xhr.setRequestHeader("Authorization", "Bearer " + token);
-  if(isFile) xhr.setRequestHeader("X-File-Name",encodeURIComponent(selected.name));
-  xhr.setRequestHeader("Content-Type", isImage ? (selected.type || "application/octet-stream") : "application/json");
-  try { xhr.send(isImage ? selected : JSON.stringify({text:el("text").value})); }
+  if(isFile) xhr.setRequestHeader("X-File-Name",encodeURIComponent(upload.name));
+  xhr.setRequestHeader("Content-Type", isImage ? (upload.type || "application/octet-stream") : "application/json");
+  try { xhr.send(isImage ? upload : JSON.stringify({text:el("text").value})); }
   catch(error) { finish(error.message || "发送失败，请重新选择文件。", "error"); }
   }
   uploadNext(0);
@@ -246,7 +278,7 @@ async function connect() {
   finally { clearTimeout(timeout); }
 }
 
-let revision = -1, timer = null, polling = false, recordUrls = [];
+let revision = -1, timer = null, polling = false, recordUrls = [], recordPreviewChain=Promise.resolve();
 el("text").addEventListener("input", controls);
 el("remove-image").addEventListener("click", () => { if(!busy) { ++generation; clearSelection(); message("请输入文字，或选择另一张图片。"); } });
 function clearRecords(){ revision = -1; el("records").replaceChildren(); for(const url of recordUrls) URL.revokeObjectURL(url); recordUrls = []; clearTimeout(timer); }
@@ -263,6 +295,15 @@ async function api(path, options={}) {
 }
 async function ack(id,state){ await api("/exchange/ack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,state})}); }
 function node(tag,text,className){ const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(className)n.className=className; return n; }
+function loadRecordPreview(card,img,id){
+  // One preview request at a time leaves a receiver slot for the serial upload.
+  recordPreviewChain=recordPreviewChain.then(async()=>{
+    if(!card.isConnected)return;
+    const response=await api("/exchange/image/"+id+"/preview"),blob=await response.blob();
+    if(!card.isConnected)return;
+    const url=URL.createObjectURL(blob);recordUrls.push(url);img.src=url;
+  }).catch(()=>{if(card.isConnected)img.replaceWith(node("p","预览暂不可用，可尝试下载原图。"));});
+}
 function render(items){
   for(const url of recordUrls) URL.revokeObjectURL(url); recordUrls=[];
   const list=el("records"); list.replaceChildren();
@@ -281,7 +322,7 @@ function render(items){
       card.append(copy);
     } else if(item.kind==="image") {
       const img=document.createElement("img");img.alt="互传图片预览";card.append(img);
-      api("/exchange/image/"+item.id+"/preview").then(r=>r.blob()).then(blob=>{if(!card.isConnected)return;const url=URL.createObjectURL(blob);recordUrls.push(url);img.src=url;}).catch(()=>{img.replaceWith(node("p","预览暂不可用，可尝试下载原图。"));});
+      loadRecordPreview(card,img,item.id);
       card.append(node("p",`${item.width} × ${item.height} · ${(item.size/1048576).toFixed(2)} MiB · 原图`));
       const download=node("button","下载原图");download.type="button";
       download.onclick=async()=>{download.disabled=true;download.textContent="正在下载…";try{

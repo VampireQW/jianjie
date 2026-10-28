@@ -11,15 +11,22 @@ import runpy
 LITE = os.environ.get("JJ_LITE") == "1"
 _native_binaries = []
 _airplay_datas = []
+_iphone_control_datas = []
+_airplay_external_runtime_root = None
 if not LITE:
     # Build from the current C++ source before packaging; never silently ship an old DLL.
     _native_build = runpy.run_path(os.path.join(SPECPATH, "native", "build.py"))
     _native_binaries = [(_native_build["build"](), "native")]
-    _airplay_build = runpy.run_path(os.path.join(SPECPATH, "native", "airplay", "build.py"))
-    _airplay_build["build"]()
-    _airplay_datas = [(os.path.join(SPECPATH, "native", "airplay", name), "native/airplay")
-                      for name in ("receiver.exe", "manifest.json", "LICENSE", "source.zip",
-                                   "configure_firewall.ps1")]
+    _airplay_package = runpy.run_path(os.path.join(SPECPATH, "native", "airplay", "package.py"))
+    _airplay_prebuilt = os.environ.get("JJ_AIRPLAY_PREBUILT_RECEIVER")
+    _airplay_datas = _airplay_package["package_data"](SPECPATH, _airplay_prebuilt)
+    if _airplay_prebuilt:
+        _airplay_external_runtime_root = os.path.normcase(os.path.abspath(os.path.dirname(_airplay_prebuilt))) + os.sep
+    _control_build = runpy.run_path(os.path.join(SPECPATH, "native", "iphone_control", "build.py"))
+    _control_build["build"]()
+    _control_files = ("control.exe", "manifest.json", "build.py", "README.md", *_control_build["SOURCES"])
+    _iphone_control_datas = [(os.path.join(SPECPATH, "native", "iphone_control", name), "native/iphone_control")
+                             for name in _control_files]
 
 _excludes = [
     "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtQmlModels",
@@ -51,7 +58,7 @@ _kill = ("opengl32sw", "qt6qml", "qt6quick", "qt6pdf", "qt6svgwidgets", "qt6open
          "qtpdf", "qtsvgwidgets", "qtopengl", "qtnetwork", "qttest", "qtvirtualkeyboard",
          "_avif",
          # R182：_hashlib 可选的 OpenSSL 后端已排除，防止 ctypes/DLL 扫描再次带入 libcrypto。
-         "libcrypto-3.dll", "libssl-3.dll",
+         "libcrypto-3", "libssl-3", "libwinpthread-1.dll",
          # R161：不要把宿主 PATH 中其他软件的 ICU 打进包（曾误收 Codex Poppler ICU 78，覆盖系统 ICU 后 QtCore 导入失败）
          "icudt", "icuuc", "icuin", "icuio", "icutest", "icutu",
          # R162：Win10+ 由系统 API-set 映射解析，禁止打包宿主机版本以避免版本漂移与包体膨胀。
@@ -78,7 +85,7 @@ a = Analysis(
     ['main.pyw'],
     pathex=[],
     binaries=_native_binaries,
-    datas=_airplay_datas,
+    datas=_airplay_datas + _iphone_control_datas,
     hiddenimports=_hidden,
     hookspath=[],
     hooksconfig={},
@@ -88,6 +95,12 @@ a = Analysis(
     optimize=0,
 )
 a.binaries = [b for b in a.binaries if not any(k in b[0].lower() for k in _kill)]
+if _airplay_external_runtime_root:
+    # Media DLLs are provisioned in the private component directory. Do not
+    # duplicate the receiver's sibling runtime in the GUI's onefile archive.
+    a.binaries = [b for b in a.binaries
+                  if b[0].replace("\\", "/") == "native/airplay/receiver.exe"
+                  or not os.path.normcase(os.path.abspath(b[1])).startswith(_airplay_external_runtime_root)]
 
 
 def _keep_data(d):

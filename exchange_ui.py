@@ -112,7 +112,7 @@ class ExchangePane(QFrame):
         label.setObjectName("phoneStepTitle")
         record_header.addWidget(label)
         record_header.addStretch()
-        ttl = QLabel("最近 5 条 · 30 分钟后自动清除")
+        ttl = QLabel("最近 9 条 · 30 分钟后自动清除")
         ttl.setObjectName("phoneHint")
         record_header.addWidget(ttl)
         self.clear_records = QPushButton("清空记录")
@@ -160,7 +160,7 @@ class ExchangePane(QFrame):
         self.path, self.paths = paths[0], list(paths)
         self.generic_file = True
         self.show_image(f"{len(paths)} 个文件 · 合计 {sum(sizes)/1048576:.2f} MiB")
-        self.feedback.setText("按顺序准备发送，每个最大 2 GiB；临时记录保留最近 5 条。")
+        self.feedback.setText("按顺序准备发送，每个最大 2 GiB；临时记录保留最近 9 条。")
 
     def select_path(self, path):
         from phone_receive import read_phone_image

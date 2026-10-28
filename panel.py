@@ -19,6 +19,7 @@ G3 = "系统"
 # (group, name, glyph, bg, desc, hotkey, controller_method) —— 单字字形图标 + 块状网格，密度优先
 ACTIONS_FULL = [
     (G1, "截图", "截", "#3b82f6", "框选 · 标注 · 复制/钉图", "A", "shot"),
+    (G1, "截图历史", "图", "#6366f1", "原图与标注 · 随时继续编辑", None, "screenshot_history"),
     (G1, "长截图", "长", "#10b981", "滚动拼接 · 可编辑标注长图", "S", "long"),
     (G1, "录屏", "录", "#0ea5e9", "录制选区 MP4", "R", "rec"),   # R136：去红（用户点名「录屏的图标默认不要用红色」）
     (G1, "屏幕取色", "色", "#d946ef", "放大镜取色 · 色值入板", "C", "colorpick"),   # R103
@@ -42,14 +43,14 @@ ACTIONS_FULL = [
 
 # R107/R108 轻量版（截图+长截图+GIF）：只留核心动作 + 系统组（设置性质不算功能入口）
 # GIF 无面板块，入口在截图工具条（capture.py），与全量版同式
-_ACTIONS_LITE_KEEP = {"截图", "长截图"}
+_ACTIONS_LITE_KEEP = {"截图", "长截图", "截图历史"}
 ACTIONS = ([a for a in ACTIONS_FULL if a[0] == G3 or a[1] in _ACTIONS_LITE_KEEP]
            if LITE else ACTIONS_FULL)
 
 # R133 lucide 图标映射（meth → lucide name，design.md §3；ACTIONS 的 glyph 单字字段随之退役）
 ACT_LUCIDE = {
     "shot": "scissors", "long": "scroll", "rec": "monitor-play", "colorpick": "pipette",
-    "ocr": "scan-text", "clip": "clipboard-list", "trim": "film", "imgedit": "paintbrush",
+    "ocr": "scan-text", "clip": "clipboard-list", "trim": "film", "imgedit": "paintbrush", "screenshot_history": "history",
     "qr_gen": "qr-code", "phone_receive": "smartphone", "calendar": "calendar-days", "netspeed": "gauge",
     "pomodoro": "timer", "fsearch": "file-search", "note": "list-todo",
     "lock": "lock", "showdesk": "monitor", "iphone_mirror": "airplay",
