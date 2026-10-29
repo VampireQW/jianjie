@@ -177,10 +177,40 @@ class _HoverLucidePushButton(QPushButton):
         super().mouseMoveEvent(ev)
 
 
+class _UtilityWindowStateFilter(QObject):
+    def eventFilter(self, win, event):
+        if event.type() == QEvent.Show:
+            C.ensure_utility_taskbar_entry(win)
+        if (event.type() == QEvent.WindowStateChange
+                and event.oldState() & Qt.WindowMinimized and not win.isMinimized()
+                and (getattr(win, '_pinned', False) or win.windowFlags() & Qt.WindowStaysOnTopHint)):
+            QTimer.singleShot(0, lambda: C.set_topmost(win, True))
+        return False
+
+
+def add_minimize_button(win, layout, size=34):
+    button = _PluginHeaderIconButton("minus", 16, layout.parentWidget())
+    button.setObjectName("windowMinimizeButton")
+    button.setFixedSize(size, size)
+    button.setToolTip("最小化")
+    button.setAccessibleName("最小化")
+    button.setStyleSheet(
+        "QToolButton#windowMinimizeButton{background:transparent;border:none;padding:0;border-radius:6px;}"
+        "QToolButton#windowMinimizeButton:hover{background:rgba(255,255,255,20);}"
+        "QToolButton#windowMinimizeButton:pressed{background:rgba(255,255,255,30);}")
+    button.clicked.connect(win.showMinimized)
+    layout.addWidget(button)
+    win.btn_minimize = button
+    win.setWindowIcon(C.app_qicon())
+    win._utility_state_filter = _UtilityWindowStateFilter(win)
+    win.installEventFilter(win._utility_state_filter)
+    return button
+
+
 def _plugin_shell(win, title, sub="", on_hide=None, min_size=(280, 240)):
     """R146 五窗统一壳装配：无边框黑透插件（标题栏/钉×/拖动/Esc/阴影/八向缩放）。
     返回 (body_layout, sub_lbl)——内容控件往 body_layout 装，副信息（计数等）写 sub_lbl。"""
-    win.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)      # R150：默认不钉（用户点名钉由手动点）；flags 全程不含 StaysOnTop，置顶走 Win32 不闪
+    win.setWindowFlags(C.utility_window_flags())
     win.setAttribute(Qt.WA_TranslucentBackground, True)
     win._pinned = False                                       # 钉态真相源（_toggle_pin 翻转）
     win.setMinimumSize(*min_size)
@@ -223,6 +253,7 @@ def _plugin_shell(win, title, sub="", on_hide=None, min_size=(280, 240)):
 
     pin.toggled.connect(_toggle_pin)
     hl.addWidget(pin)
+    add_minimize_button(win, hl)
     x = _PluginHeaderIconButton("x", 16, head)
     x.setObjectName("headBtn")
     x.setFixedSize(34, 34)
@@ -385,7 +416,7 @@ class CalendarWindow(QWidget):
         super().__init__(None)
         self.setWindowTitle(f"{C.APP_NAME} · 日历")
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)   # R150：默认不钉；flags 全程无 StaysOnTop（置顶走 Win32 不闪）
+        self.setWindowFlags(C.utility_window_flags())
         self._pinned = False                                  # 钉态真相源（toggle_pin 翻转）
         self.setFixedSize(604, 728)          # 固定尺寸：防止拉大后网格行高被撑爆、角标与数字脱节；R148 +18 全投顶部呼吸
         self._drag_off = None
@@ -431,6 +462,7 @@ class CalendarWindow(QWidget):
         self.btn_pin.setIconSize(QSize(14, 14))          # 钉图标：与任务清单同款矢量
         self.btn_pin.clicked.connect(self.toggle_pin)
         self._sync_pin_icon(False)                       # R150：默认不钉（用户点名：钉由用户手动点）
+        add_minimize_button(self, hl, 26)
         self.btn_close = self._head_btn("", "关闭（Esc）")
         self.btn_close.setIcon(icons.lucide_icon("x", "#9ca3af", 16))   # R149：18→16 与任务清单新叉全局一致（用户点名「日历改成跟这个一致」）
         self.btn_close.setIconSize(QSize(16, 16))
@@ -825,10 +857,7 @@ class CardDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"{C.APP_NAME} · {title}")
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        flags = Qt.Dialog | Qt.FramelessWindowHint
-        if on_top:
-            flags |= Qt.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
+        self.setWindowFlags(C.utility_window_flags(on_top))
         self._drag_off = None
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)     # 四边留白给自绘阴影
@@ -867,6 +896,7 @@ class CardDialog(QDialog):
             sub.setStyleSheet("color:#6b7280; font-size:11px; background:transparent;")
             hl.addWidget(sub)
         hl.addStretch()
+        add_minimize_button(self, hl, 26)
         x = QToolButton(self.head)
         x.setIcon(icons.lucide_icon("x", "#9ca3af", 16))          # R149：18→16 全局同尺寸（「其他弹窗叉同时改」）
         x.setIconSize(QSize(16, 16))
@@ -2830,7 +2860,7 @@ class NetSpeedWidget(QWidget):
     def __init__(self):
         super().__init__(None)
         self.setWindowTitle(f"{C.APP_NAME} · 网速")
-        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(C.utility_window_flags(on_top=True))
         self.setAttribute(Qt.WA_TranslucentBackground, True)   # 半透保留项
         self.setStyleSheet(
             "QLabel{color:#e5e7eb;font-size:12px;background:transparent;"
@@ -2885,6 +2915,7 @@ class NetSpeedWidget(QWidget):
         self.test_btn.setCursor(Qt.PointingHandCursor)
         self.test_btn.clicked.connect(self._on_test)
         head.addWidget(self.test_btn)
+        add_minimize_button(self, head, 22)
         x = _HoverLucidePushButton("x", 16, self.body)  # R176：独立 hover 样式与事件状态，不受通用按钮内边距影响
         x.setObjectName("ns_close")
         x.setFixedSize(22, 22)

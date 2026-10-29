@@ -14,6 +14,11 @@ import tempfile
 import threading
 import time
 
+# 本地 MCP：在 Qt、单实例和热键初始化前分流，仍使用同一个正式 EXE。
+if __name__ == "__main__" and "--mcp" in sys.argv:
+    from local_tasks.mcp import main as _local_mcp_main
+    raise SystemExit(_local_mcp_main())
+
 # 存储切换由旧进程正常退出后启动；避免新实例抢先打开旧数据库。
 if "--wait-parent" in sys.argv:
     try:
@@ -1022,7 +1027,7 @@ class Controller(QObject):
             QApplication.instance().aboutToQuit.connect(self._mirror_session.shutdown)
         dialog = self._mirror_dialog
         if dialog is not None:
-            dialog.show()
+            dialog.showNormal() if dialog.isMinimized() else dialog.show()
             dialog.raise_()
             dialog.activateWindow()
             if self._mirror_session.state in ("idle", "error"):
@@ -1207,6 +1212,7 @@ class Controller(QObject):
             return
         d = QDialog()
         d.setWindowTitle(f"{C.APP_NAME} · 提取文字（离线 OCR）")
+        d.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
         lay = QVBoxLayout(d)
         stat = QLabel("正在识别…（Windows 离线 OCR，约 1-3 秒）")
         stat.setStyleSheet("color:#8a92a6;font-size:12px;")
@@ -1276,6 +1282,7 @@ class Controller(QObject):
             return
         d = QDialog()
         d.setWindowTitle(f"{C.APP_NAME} · 一键快剪")
+        d.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
         lay = QVBoxLayout(d)
         tip = QLabel(f"源视频（最近录屏）：\n{src}")
         tip.setWordWrap(True)
@@ -1327,6 +1334,8 @@ class Controller(QObject):
         dialog = self._settings_dialog
         if dialog is not None:
             dialog.set_autostart(EX.autostart_enabled())
+            if dialog.isMinimized():
+                dialog.showNormal()
             dialog.raise_()
             dialog.activateWindow()
             return
@@ -1725,7 +1734,7 @@ class Controller(QObject):
         if window is not None:
             try:
                 visible = window.isVisible()
-                if delete_on_close and not visible:
+                if delete_on_close and not visible and not window.isMinimized():
                     # close 后的延迟销毁可能尚未处理，避免重新显示待销毁的窗口。
                     window.close()
                     window = None
@@ -1745,7 +1754,7 @@ class Controller(QObject):
                     setattr(self, generation_attribute, None)
 
             window.destroyed.connect(forget)
-        window.show()
+        window.showNormal() if window.isMinimized() else window.show()
         window.raise_()
         window.activateWindow()
         return window
@@ -1855,7 +1864,9 @@ class Controller(QObject):
         # Everything 式文件搜索：窗口秒开，索引后台构建（构建中即可查）；
         # 已开着就置前，避免双实例并发重建同一索引库。
         w = getattr(self, "_fswin", None)
-        if w is not None and w.isVisible():
+        if w is not None and (w.isVisible() or w.isMinimized()):
+            if w.isMinimized():
+                w.showNormal()
             w.raise_()
             w.activateWindow()
         else:
@@ -1882,7 +1893,11 @@ class Controller(QObject):
         # 实例属性绝不能叫 self.netspeed——会遮蔽同名方法，getattr 拿到 None，
         # 面板点「网速」就只剩一个托盘错误气泡（连坑两轮的真凶）。
         w = self._netspeed_w
-        if w is not None and w.isVisible():
+        if w is not None and w.isMinimized():
+            w.showNormal()
+            w.raise_()
+            w.activateWindow()
+        elif w is not None and w.isVisible():
             w.close()
             self._netspeed_w = None
         else:
@@ -7761,6 +7776,9 @@ def main():
     finally:
         startup_activation.stop()
     S = C.load_settings()
+    if "--enable-local-mcp" in sys.argv:
+        S["local_mcp_enabled"] = True
+        C.save_settings(S)
 
     panel = Panel(S)
     tray = QSystemTrayIcon(C.app_qicon())
@@ -7789,6 +7807,21 @@ def main():
         menu.addSeparator()
         add("番茄钟", lambda: ctl.pomodoro())          # 与面板动作表同步：待办/快记未在面板暴露，已移除
         add("任务清单", lambda: ctl.note())              # R87
+        agent_act = QAction("本地 MCP（允许 Agent 管理任务）", menu)
+        agent_act.setCheckable(True)
+        agent_act.setChecked(ctl.tasks.agent_enabled())
+        def set_local_agent(on):
+            try:
+                ctl.tasks.set_agent_enabled(on)
+                S["local_mcp_enabled"] = bool(on)
+                C.save_settings(S)
+            except OSError:
+                agent_act.blockSignals(True)
+                agent_act.setChecked(ctl.tasks.agent_enabled())
+                agent_act.blockSignals(False)
+                tray.showMessage("简截 · 本地 MCP", "无法切换本地接口，请检查数据目录权限后重试")
+        agent_act.toggled.connect(set_local_agent)
+        menu.addAction(agent_act)
     menu.addSeparator()
 
     auto_act = QAction("开机自启", menu)
@@ -7886,4 +7919,20 @@ if __name__ == "__main__":
                     sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
             sys.exit(result)
         sys.exit(smoke())
+    if "--task-smoke" in sys.argv:
+        from local_tasks.smoke import run as _task_smoke
+        _task_log = (sys.argv[sys.argv.index("--smoke-log") + 1] if "--smoke-log" in sys.argv
+                     else os.path.join(tempfile.gettempdir(), "JianJie-task-smoke.log"))
+        with open(_task_log, "w", encoding="utf-8", buffering=1) as _log:
+            sys.stdout = sys.stderr = _log
+            try:
+                _result = _task_smoke()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                _result = 1
+        raise SystemExit(_result)
+    if not LITE:
+        from local_tasks.desktop import install as _install_local_tasks
+        _install_local_tasks()
     main()

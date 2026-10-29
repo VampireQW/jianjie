@@ -2,10 +2,11 @@
 import math
 
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFontMetricsF, QIcon, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QFrame, QGridLayout,
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import (QButtonGroup, QColorDialog, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
 import common as C
+from polished_controls import SurfaceButton, SurfaceCheckBox
 
 PRESETS = {
     'mist': ('雾蓝', '#edf2ff', '#c6d6f5'),
@@ -198,57 +199,24 @@ class BeautyPreview(QWidget):
         painter.end()
 
 
-class BeautyCombo(QComboBox):
-    """Keep native combo keyboard/popup behavior, with a crisp painted field."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(36)
+class BeautyChoice(QPushButton):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setAutoDefault(False)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet('QComboBox{border:none;min-height:36px;max-height:36px;padding:0 40px 0 12px;background:transparent;}'
-                           'QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:top right;width:36px;border:none;}'
-                           'QComboBox::down-arrow{image:none;}')
-        view = self.view()
-        view.setFrameShape(QFrame.NoFrame)
-        view.setStyleSheet('QListView{background:#202735;color:#eef1f7;border:1px solid #465165;'
-                          'border-radius:8px;padding:5px;outline:none;}'
-                          'QListView::item{border:none;border-radius:5px;padding:7px 10px;}'
-                          'QListView::item:selected{background:#304568;color:#eef1f7;}'
-                          'QListView::item:hover{background:#293a55;}')
-        popup = view.window()
-        popup.setObjectName('beautyComboPopup')
-        popup.setWindowFlag(Qt.FramelessWindowHint, True)
-        popup.setAttribute(Qt.WA_TranslucentBackground, True)
-        popup.setStyleSheet('QFrame#beautyComboPopup{background:transparent;border:none;}')
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setStyleSheet('QPushButton{background:transparent;border:none;padding:0;}')
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        enabled = self.isEnabled()
-        border = '#60a5fa' if self.hasFocus() else '#596a83' if self.underMouse() else '#465165'
-        painter.setPen(QPen(QColor(border if enabled else '#333e50'), 1))
-        painter.setBrush(QColor('#202735'))
-        painter.drawRoundedRect(QRectF(self.rect()).adjusted(.5, .5, -.5, -.5), 8, 8)
-        left = 12
-        icon = self.itemIcon(self.currentIndex())
-        if not icon.isNull():
-            icon.paint(painter, QRect(left, (self.height()-16)//2, 16, 16), Qt.AlignCenter,
-                       QIcon.Normal if enabled else QIcon.Disabled)
-            left += 24
-        text_rect = QRect(left, 0, max(1, self.width()-left-40), self.height())
-        painter.setFont(self.font())
-        painter.setPen(QColor(C.UI_TEXT if enabled else '#8290a6'))
-        metrics = QFontMetricsF(painter.font(), self)
-        text = metrics.elidedText(self.currentText(), Qt.ElideRight, text_rect.width())
-        ink = metrics.tightBoundingRect('国')  # Stable CJK baseline across both fields and selected values.
-        painter.drawText(QPointF(left, self.height()/2-ink.center().y()), text)
-        x, y = self.width()-20, self.height()/2
-        arrow = QPainterPath(QPointF(x-4, y-2))
-        arrow.lineTo(x, y+2)
-        arrow.lineTo(x+4, y-2)
-        painter.setPen(QPen(QColor('#c1cede' if enabled else '#69778b'), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawPath(arrow)
-        painter.end()
+    def sizeHint(self):
+        return QSize(72, self.minimumHeight())
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -258,6 +226,114 @@ class BeautyCombo(QComboBox):
         super().leaveEvent(event)
         self.update()
 
+    def label_font(self, painter):
+        font = QFont(self.font())
+        font.setPixelSize(12)
+        font.setWeight(QFont.DemiBold if self.isChecked() else QFont.Normal)
+        painter.setFont(font)
+
+
+class ColorSwatch(BeautyChoice):
+    def __init__(self, key, custom_color, parent=None):
+        super().__init__(PRESETS[key][0], parent)
+        self.key, self.custom_color = key, custom_color
+        self.setFixedHeight(54)
+        self.setAccessibleName('背景 · '+self.text())
+        self.setToolTip('选择自定义背景颜色' if key == 'custom' else self.text())
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        if not self.isEnabled():
+            painter.setOpacity(.38)
+        stroke = max(1, round(self.devicePixelRatioF())) / self.devicePixelRatioF()
+        rect = QRectF(4, 4, self.width()-8, 29)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 6, 6)
+        painter.save()
+        painter.setClipPath(path)
+        _, first, second = PRESETS[self.key]
+        if self.key == 'transparent':
+            painter.fillRect(rect, QColor('#d8dee8'))
+            for row in range(5):
+                for col in range(math.ceil(rect.width()/7)):
+                    if (row+col) % 2 == 0:
+                        painter.fillRect(QRectF(rect.x()+col*7, rect.y()+row*7, 7, 7), QColor('#a8b3c4'))
+        else:
+            gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            gradient.setColorAt(0, QColor(first or self.custom_color))
+            gradient.setColorAt(1, QColor(second or first or self.custom_color))
+            painter.fillRect(rect, gradient)
+        painter.restore()
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor('#66768f' if self.underMouse() else '#465268'), stroke))
+        painter.drawPath(path)
+        if self.isChecked() or self.hasFocus():
+            painter.setPen(QPen(QColor('#83b9ff' if self.isChecked() else '#a8caff'), stroke*1.5))
+            painter.drawRoundedRect(rect.adjusted(-2, -2, 2, 2), 8, 8)
+        if self.key == 'custom':
+            color = QColor('#28384f' if QColor(self.custom_color).lightnessF() > .6 else '#f1f5ff')
+            painter.setPen(QPen(color, 1.5, Qt.SolidLine, Qt.RoundCap))
+            x, y = rect.center().x(), rect.center().y()
+            painter.drawLine(QPointF(x-4, y), QPointF(x+4, y))
+            painter.drawLine(QPointF(x, y-4), QPointF(x, y+4))
+        if self.isChecked():
+            center = QPointF(rect.right()-8, rect.top()+8)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor('#3279df'))
+            painter.drawEllipse(center, 5.5, 5.5)
+            tick = QPainterPath(QPointF(center.x()-2.5, center.y()))
+            tick.lineTo(center.x()-.5, center.y()+2)
+            tick.lineTo(center.x()+3, center.y()-2)
+            painter.setPen(QPen(QColor('#ffffff'), 1.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(tick)
+        self.label_font(painter)
+        painter.setPen(QColor('#b9d7ff' if self.isChecked() else '#b5c1d3'))
+        painter.drawText(QRectF(0, 36, self.width(), 18), Qt.AlignCenter, self.text())
+        painter.end()
+
+
+class RatioChoice(BeautyChoice):
+    def __init__(self, label, value, parent=None):
+        super().__init__(label, parent)
+        self.value = value
+        self.setFixedHeight(48)
+        self.setAccessibleName('画布比例 · '+label)
+        self.setToolTip('跟随原图与留白' if value == 'auto' else label+' 画布')
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        if not self.isEnabled():
+            painter.setOpacity(.38)
+        stroke = max(1, round(self.devicePixelRatioF())) / self.devicePixelRatioF()
+        inset = stroke/2
+        rect = QRectF(inset, inset, self.width()-stroke, self.height()-stroke)
+        active = self.isChecked()
+        painter.setBrush(QColor('#20324d' if active else '#1d2736' if self.underMouse() else '#171e2b'))
+        painter.setPen(QPen(QColor('#83b9ff' if active or self.hasFocus() else '#586b85' if self.underMouse() else '#344155'), stroke))
+        painter.drawRoundedRect(rect, 7, 7)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor('#a8ceff' if active else '#8395b0'), stroke))
+        if self.value == 'auto':
+            x, y = self.width()/2, 15
+            corners = QPainterPath()
+            for sx, sy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+                corners.moveTo(x+sx*4, y+sy*5)
+                corners.lineTo(x+sx*8, y+sy*5)
+                corners.lineTo(x+sx*8, y+sy*1)
+            painter.drawPath(corners)
+        else:
+            a, b = map(int, self.value.split(':'))
+            factor = min(22/a, 14/b)
+            w, h = a*factor, b*factor
+            painter.drawRoundedRect(QRectF((self.width()-w)/2, 15-h/2, w, h), 1.5, 1.5)
+        self.label_font(painter)
+        painter.setPen(QColor('#d6e7ff' if active else '#b5c1d3'))
+        painter.drawText(QRectF(0, 27, self.width(), 17), Qt.AlignCenter, self.text())
+        painter.end()
+
 
 class BeautyPanel(QFrame):
     changed = Signal(dict)
@@ -266,111 +342,152 @@ class BeautyPanel(QFrame):
         super().__init__(parent)
         self.settings = normalize(settings)
         self.setObjectName('beautyPanel')
-        self.setFixedWidth(244)
+        self.setFixedWidth(276)
         self.setStyleSheet(f'''
         QFrame#beautyPanel {{background:{C.UI_BG_CARD};border-left:1px solid {C.UI_BORDER};}}
         QWidget#beautyOptions {{background:transparent;}}
         QLabel {{color:{C.UI_TEXT};background:transparent;}}
         QCheckBox {{color:{C.UI_TEXT};background:transparent;spacing:8px;}}
-        QComboBox {{background:#202735;border:1px solid #465165;border-radius:7px;padding:6px 8px;color:{C.UI_TEXT};min-height:20px;}}
-        QComboBox QAbstractItemView {{background:#202735;color:{C.UI_TEXT};selection-background-color:#304568;}}
-        QPushButton {{background:#202735;color:{C.UI_TEXT};border:1px solid #465165;border-radius:7px;padding:6px 10px;}}
-        QPushButton:hover {{background:#293447;}}
-        QComboBox:disabled {{color:#69778b;border-color:#30394a;}}
-        QPushButton:focus,QComboBox:focus {{border-color:#60a5fa;}}
-        QSlider::groove:horizontal {{height:4px;background:#354052;border-radius:2px;}}
-        QSlider::sub-page:horizontal {{background:#60a5fa;border-radius:2px;}}
-        QSlider::handle:horizontal {{width:14px;margin:-5px 0;background:#dbeafe;border-radius:7px;}}
+        QSlider {{background:transparent;}}
+        QSlider::groove:horizontal {{height:3px;background:#344155;border-radius:1px;}}
+        QSlider::sub-page:horizontal {{background:#80b4fc;border-radius:1px;}}
+        QSlider::handle:horizontal {{width:12px;margin:-5px 0;background:#dbeafe;border:1px solid #263b58;border-radius:6px;}}
         ''')
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 18, 18, 16)
-        root.setSpacing(16)
+        root.setContentsMargins(16, 14, 16, 12)
+        root.setSpacing(12)
+        heading = QHBoxLayout()
         title = QLabel('画布样式')
-        title.setStyleSheet('font-size:15px;font-weight:600;')
-        root.addWidget(title)
-        self.enabled = QCheckBox('开启美化')
+        title.setStyleSheet('font-size:14px;font-weight:600;')
+        heading.addWidget(title)
+        heading.addStretch()
+        self.enabled = SurfaceCheckBox('开启美化')
+        self.enabled.setStyleSheet('font-size:11px;')
         self.enabled.setChecked(self.settings['enabled'])
         self.enabled.toggled.connect(lambda value: self._change('enabled', value))
-        root.addWidget(self.enabled)
+        heading.addWidget(self.enabled)
+        root.addLayout(heading)
         self.options = QWidget()
         self.options.setObjectName('beautyOptions')
         options = QVBoxLayout(self.options)
         options.setContentsMargins(0, 0, 0, 0)
-        options.setSpacing(14)
+        options.setSpacing(16)
         root.addWidget(self.options)
-        options.addWidget(QLabel('背景'))
-        self.background = BeautyCombo()
-        for key, (label, first, second) in PRESETS.items():
-            swatch = QPixmap(20, 20)
-            swatch.fill(Qt.transparent)
-            painter = QPainter(swatch)
-            painter.setRenderHint(QPainter.Antialiasing, True)
-            gradient = QLinearGradient(0, 0, 20, 20)
-            gradient.setColorAt(0, QColor(first or '#eef1f7'))
-            gradient.setColorAt(1, QColor(second or '#75849a'))
-            painter.setBrush(gradient)
-            painter.setPen(QPen(QColor(255, 255, 255, 45), 1))
-            painter.drawRoundedRect(QRectF(.5, .5, 19, 19), 4, 4)
-            painter.end()
-            self.background.addItem(QIcon(swatch), label, key)
-        self.background.setCurrentIndex(self.background.findData(self.settings['background']))
-        self.background.setAccessibleName('画布背景')
-        self.background.currentIndexChanged.connect(lambda index: self._change('background', self.background.itemData(index)))
-        options.addWidget(self.background)
-        self.custom = QPushButton('选择自定义颜色')
-        self.custom.clicked.connect(self._pick_color)
-        options.addWidget(self.custom)
-        options.addWidget(QLabel('画布比例'))
-        self.ratio = BeautyCombo()
-        for label, value in RATIOS:
-            self.ratio.addItem(label, value)
-        self.ratio.setCurrentIndex(self.ratio.findData(self.settings['ratio']))
-        self.ratio.setAccessibleName('画布比例')
-        self.ratio.currentIndexChanged.connect(lambda index: self._change('ratio', self.ratio.itemData(index)))
-        options.addWidget(self.ratio)
+        self.background_group = QButtonGroup(self)
+        self.background_buttons = {}
+        palette = self._section(options, '背景')
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(8)
+        for index, key in enumerate(PRESETS):
+            button = ColorSwatch(key, self.settings['color'])
+            self.background_group.addButton(button)
+            self.background_buttons[key] = button
+            grid.addWidget(button, index//3, index%3)
+        for col in range(3):
+            grid.setColumnStretch(col, 1)
+        palette.addLayout(grid)
+        self.background_group.buttonClicked.connect(self._choose_background)
+        self.ratio_group = QButtonGroup(self)
+        self.ratio_buttons = {}
+        ratio_section = self._section(options, '画布比例')
+        ratio_grid = QGridLayout()
+        ratio_grid.setContentsMargins(0, 0, 0, 0)
+        ratio_grid.setSpacing(8)
+        for index, (label, value) in enumerate(RATIOS):
+            button = RatioChoice(label, value)
+            self.ratio_group.addButton(button)
+            self.ratio_buttons[value] = button
+            ratio_grid.addWidget(button, index//3, index%3)
+        for col in range(3):
+            ratio_grid.setColumnStretch(col, 1)
+        ratio_section.addLayout(ratio_grid)
+        self.ratio_group.buttonClicked.connect(lambda button: self._change('ratio', button.value))
+        details = self._section(options, '细节')
+        details.setSpacing(6)
         self.sliders = {}
+        self._numbers = {}
         for key, label, upper, unit in (('padding', '留白', 160, 'px'), ('radius', '圆角', 80, 'px'), ('shadow', '阴影', 100, '%')):
             row = QHBoxLayout()
-            row.addWidget(QLabel(label))
-            row.addStretch()
+            row.setSpacing(9)
+            caption = QLabel(label)
+            caption.setFixedWidth(30)
+            caption.setStyleSheet('font-size:12px;')
+            row.addWidget(caption)
             number = QLabel(f"{self.settings[key]} {unit}")
+            number.setFixedWidth(42)
+            number.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             number.setStyleSheet(f'color:{C.UI_TEXT2};font-size:12px;')
-            row.addWidget(number)
-            options.addLayout(row)
             slider = QSlider(Qt.Horizontal)
+            slider.setMinimumHeight(28)
             slider.setRange(0, upper)
             slider.setValue(self.settings[key])
             slider.setAccessibleName(label)
-            slider.valueChanged.connect(lambda value, k=key, n=number, u=unit: (n.setText(f'{value} {u}'), self._change(k, value)))
-            options.addWidget(slider)
+            slider.valueChanged.connect(lambda value, k=key: self._change(k, value))
+            row.addWidget(slider, 1)
+            row.addWidget(number)
+            details.addLayout(row)
             self.sliders[key] = slider
+            self._numbers[key] = (number, unit)
         root.addStretch()
-        reset = QPushButton('重置样式')
+        reset = SurfaceButton('重置样式', pixels=12)
         reset.clicked.connect(self._reset)
         root.addWidget(reset)
         self.dimensions = QLabel()
         self.dimensions.setWordWrap(True)
         self.dimensions.setStyleSheet(f'color:{C.UI_TEXT2};font-size:11px;')
         root.addWidget(self.dimensions)
+        self._sync_controls()
+
+    @staticmethod
+    def _section(parent_layout, text):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        title = QLabel(text)
+        title.setStyleSheet('font-size:12px;font-weight:600;color:#bfcde0;')
+        layout.addWidget(title)
+        parent_layout.addLayout(layout)
+        return layout
+
+    def _sync_controls(self):
+        self.enabled.blockSignals(True)
+        self.enabled.setChecked(self.settings['enabled'])
+        self.enabled.blockSignals(False)
         self.options.setEnabled(self.settings['enabled'])
-        self.custom.setVisible(self.settings['background'] == 'custom')
+        for key, button in self.background_buttons.items():
+            button.setChecked(key == self.settings['background'])
+            button.custom_color = self.settings['color']
+            button.update()
+        for key, button in self.ratio_buttons.items():
+            button.setChecked(key == self.settings['ratio'])
+        for key, slider in self.sliders.items():
+            slider.blockSignals(True)
+            slider.setValue(self.settings[key])
+            slider.blockSignals(False)
+            number, unit = self._numbers[key]
+            number.setText(f"{self.settings[key]} {unit}")
+
+    def _apply(self, values):
+        self.settings = normalize({**self.settings, **values})
+        self._sync_controls()
+        self.changed.emit(dict(self.settings))
 
     def _change(self, key, value):
-        self.settings = normalize({**self.settings, key: value})
-        self.options.setEnabled(self.settings['enabled'])
-        self.custom.setVisible(self.settings['background'] == 'custom')
-        self.changed.emit(dict(self.settings))
+        self._apply({key: value})
+
+    def _choose_background(self, button):
+        if button.key == 'custom':
+            self._pick_color()
+        else:
+            self._change('background', button.key)
 
     def _pick_color(self):
         color = QColorDialog.getColor(QColor(self.settings['color']), self, '选择画布颜色')
         if color.isValid():
-            self._change('color', color.name())
+            self._apply({'background': 'custom', 'color': color.name()})
+        else:
+            self._sync_controls()
 
     def _reset(self):
-        self.settings = normalize({**DEFAULT, 'enabled': True})
-        self.enabled.setChecked(True)
-        self.background.setCurrentIndex(self.background.findData(self.settings['background']))
-        self.ratio.setCurrentIndex(0)
-        for key, slider in self.sliders.items():
-            slider.setValue(self.settings[key])
-        self._change('color', DEFAULT['color'])
+        self._apply({**DEFAULT, 'enabled': True})

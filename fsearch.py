@@ -1391,6 +1391,10 @@ class FileSearchWindow(QWidget):
             self._layout_debounce.start()       # 只重绘文本，不读索引库
 
     def hideEvent(self, ev):
+        if self.isMinimized():
+            self._poll.stop()
+            super().hideEvent(ev)
+            return
         self._qgen += 1
         self._pending_result = None
         self._queries.cancel()

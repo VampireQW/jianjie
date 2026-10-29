@@ -10,7 +10,7 @@ import uuid
 
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent,
                             QParallelAnimationGroup, QPoint,
-                            QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal)
+                            QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, Signal)
 from PySide6.QtGui import (QColor, QFont, QIcon, QLinearGradient, QPainter, QPalette,
                            QPainterPath, QPen, QPixmap, QTextCursor, QTextDocument, QTextOption)
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect,
@@ -764,6 +764,27 @@ class _DoneHdr(QFrame):
         super().mousePressEvent(ev)
 
 
+def task_window_rect(rect, areas, preferred=None):
+    """恢复窗口到当前逻辑工作区；保留有效的副屏负坐标，避开屏幕间空隙。"""
+    rect = QRect(rect)
+    areas = [QRect(area) for area in areas if area.isValid()]
+    if not areas or any(area.contains(rect) for area in areas):
+        return rect
+    overlap = [max(0, area.intersected(rect).width()) * max(0, area.intersected(rect).height())
+               for area in areas]
+    if max(overlap) > 0:
+        area = areas[overlap.index(max(overlap))]
+    else:
+        area = QRect(preferred) if preferred is not None and preferred in areas else areas[0]
+    inner = area.adjusted(8, 8, -8, -8)
+    if not inner.isValid():
+        inner = area
+    width, height = min(rect.width(), inner.width()), min(rect.height(), inner.height())
+    x = max(inner.left(), min(rect.x(), inner.right() - width + 1))
+    y = max(inner.top(), min(rect.y(), inner.bottom() - height + 1))
+    return QRect(x, y, width, height)
+
+
 class TaskWidget(QWidget):
     """任务清单窗口：标题栏拖动 / 添加行（回车连记＋优先级竖条）/
     待办（可拖拽排序）＋已完成（默认折叠沉底）/ 一键清除完成 / 右下角缩放 / 钉置顶。"""
@@ -779,7 +800,7 @@ class TaskWidget(QWidget):
         self._drag_row = None                      # 正在拖拽排序的行
         self._done_collapsed = bool(manager.win.get("done_collapsed", True))   # R89 默认收起
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
+        self.setWindowFlags(C.utility_window_flags())
         self.setWindowTitle(f"{C.APP_NAME} · 任务清单")   # 否则 Alt+Tab/枚举显示进程名 pythonw
         self.setMinimumSize(250, 300)
         win = manager.win
@@ -820,6 +841,8 @@ class TaskWidget(QWidget):
         self.btn_pin = self._head_btn(hl, "", "置顶：钉在最前 / 再点取消", self.toggle_pin, checkable=True)
         self.btn_pin.setIconSize(QSize(14, 14))          # R137 钉叉视觉一致：钉缩 14（lucide pin 天然比 x 大 70%）
         self._sync_pin_icon(self._pinned)                # 内含 setChecked；默认不置顶
+        from widgets import add_minimize_button
+        add_minimize_button(self, hl)
         self.btn_hide = self._head_btn(hl, "", "隐藏（Alt+N 或托盘再呼出）", self.manager.hide_widget)
         self.btn_hide.setIcon(icons.lucide_icon("x", C.UI_TASK_CONTROL, 16))
         self.btn_hide.setIconSize(QSize(16, 16))                     # x16 bbox 8.9 ≈ pin14 bbox 宽 9.3，同宽协调
@@ -902,6 +925,17 @@ class TaskWidget(QWidget):
 
         self.setStyleSheet(_CSS)
         self.rebuild()
+
+    def ensure_on_screen(self):
+        screens = QApplication.screens()
+        primary = QApplication.primaryScreen()
+        target = task_window_rect(self.geometry(), [s.availableGeometry() for s in screens],
+                                  primary.availableGeometry() if primary else None)
+        if target == self.geometry():
+            return False
+        self.resize(target.size())
+        self.move(target.topLeft())
+        return True
 
     def _head_btn(self, hl, text, tip, cb, checkable=False):
         b = QToolButton(self.head)
@@ -1397,7 +1431,11 @@ class TaskManager:
             self.widget = TaskWidget(self)
         else:
             self.widget.rebuild()
+        if self.widget.isMinimized():
+            self.widget.showNormal()
+        self.widget.ensure_on_screen()
         self.widget.show()
+        self.widget.ensure_on_screen()
         self.widget.raise_()
         self.widget.activateWindow()
         self.win["visible"] = True
@@ -1419,8 +1457,11 @@ class TaskManager:
 
     def toggle(self):                              # 热键/托盘：显隐切换
         self._load()
-        if self.widget is not None and self.widget.isVisible():
-            self.hide_widget()
+        if self.widget is not None and self.widget.isVisible() and not self.widget.isMinimized():
+            if self.widget.ensure_on_screen():
+                self.show_widget()
+            else:
+                self.hide_widget()
         else:
             self.show_widget()
 
@@ -1429,7 +1470,9 @@ class TaskManager:
         启动自恢复/被遮挡时用户没意识到窗已开着，点击若走 toggle 会把窗误关——
         用户报「第一次点击打不开」即此错位。关闭入口：标题栏 × 或 Alt+N。"""
         self._load()
-        if self.widget is not None and self.widget.isVisible():
+        if self.widget is not None and self.widget.isVisible() and not self.widget.isMinimized():
+            if self.widget.ensure_on_screen():
+                self.save()
             self.widget.raise_()
             self.widget.activateWindow()
         else:

@@ -1214,9 +1214,16 @@ class LongEditor(QWidget):
         self.beauty_panel.changed.connect(self._beauty_changed)
         self._beauty_scroll = QScrollArea()
         self._beauty_scroll.setWidgetResizable(True)
-        self._beauty_scroll.setFixedWidth(264)
+        self._beauty_scroll.setFixedWidth(self.beauty_panel.width()+8)
+        self._beauty_scroll.setFrameShape(QFrame.NoFrame)
+        self._beauty_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._beauty_scroll.setWidget(self.beauty_panel)
-        self._beauty_scroll.setStyleSheet('QScrollArea{border:none;}')
+        self._beauty_scroll.setStyleSheet(f'QScrollArea,QScrollArea>QWidget>QWidget{{background:{C.UI_BG_CARD};border:none;}}'
+                                          'QScrollBar:vertical{background:transparent;width:6px;margin:4px 0;}'
+                                          'QScrollBar::handle:vertical{background:#3c4c63;border-radius:3px;min-height:24px;}'
+                                          'QScrollBar::handle:vertical:hover{background:#526780;}'
+                                          'QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}'
+                                          'QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}')
         self._beauty_scroll.hide()
         content = QHBoxLayout()
         content.setSpacing(0)

@@ -17,7 +17,33 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 APP_NAME = "简截"
 APP_VERSION = "4.13.7-win.1"
-APP_BUILD_ID = "R292"
+APP_BUILD_ID = "R296"
+
+
+def utility_window_flags(on_top=False):
+    """自绘标题栏的小应用保留任务栏入口，以便最小化后恢复。"""
+    flags = (Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint
+             | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint)
+    return flags | Qt.WindowStaysOnTopHint if on_top else flags
+
+
+def ensure_utility_taskbar_entry(win):
+    """带父窗口的设置/投屏对话框也需要独立的任务栏恢复入口。"""
+    try:
+        user = ctypes.windll.user32
+        get_style = user.GetWindowLongPtrW
+        get_style.argtypes = [wintypes.HWND, ctypes.c_int]
+        get_style.restype = ctypes.c_ssize_t
+        set_style = user.SetWindowLongPtrW
+        set_style.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        set_style.restype = ctypes.c_ssize_t
+        handle = int(win.winId())
+        style = get_style(handle, -20)
+        updated = (style | 0x00040000) & ~0x00000080
+        if style != updated:
+            set_style(handle, -20, updated)
+    except (AttributeError, OSError):
+        pass
 
 # ---------- 系统剪贴板（Win32 文件引用 / 静态图片） ----------
 _CF_HDROP = 15
@@ -1050,8 +1076,11 @@ def set_topmost(win, on):
     Qt flags 层全程不含 StaysOnTop；钉态真相源在各窗 _pinned 实例属性。
     flags：SWP_NOSIZE 0x1 | SWP_NOMOVE 0x2 | SWP_NOACTIVATE 0x10 | SWP_NOSHOW 0x40。"""
     try:
-        import ctypes
-        ctypes.windll.user32.SetWindowPos(int(win.winId()), -1 if on else -2,
-                                          0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040)
+        position = ctypes.windll.user32.SetWindowPos
+        position.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        position.restype = wintypes.BOOL
+        position(int(win.winId()), wintypes.HWND(-1 if on else -2),
+                 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040)
     except Exception:
         pass          # offscreen/非 Windows 容错：视觉行为降级不崩，钉态账由各窗 _pinned 自管
