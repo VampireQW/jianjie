@@ -949,10 +949,17 @@ class Controller(QObject):
             result["event"].set()
 
     def toast(self, msg, kind="info"):
+        self._interrupt_task_nudge()
         self._toast.show_msg(msg)          # 屏上浮出，2.4s 自动消失
+
+    def _interrupt_task_nudge(self):
+        nudges = getattr(getattr(self, "tasks", None), "today_nudges", None)
+        if nudges is not None:
+            nudges.interrupt()
 
     def notify_shot(self, pm, title, sub, img, document_id=None):
         """截图/长截图完成通知：原图可直接传入，只为缩略图创建 QPixmap。"""
+        self._interrupt_task_nudge()
         edit = (lambda: self.edit_screenshot(document_id)) if document_id else (lambda: self._open_image_editor(img))
         self._shot_notify.show_shot(pm, title, sub, edit,
                                     lambda: self._send_exchange_image(img))
@@ -1098,6 +1105,7 @@ class Controller(QObject):
     def start_shot(self, ocr=False, scan=False, hotkey=False):
         if self._panel_capture_ticket is not None or self.shot_overlays or self._cp_active:
             return
+        self._interrupt_task_nudge()
         # 全局热键不改变前台：趁原应用浮窗仍在，先抓画面再显示编辑层。
         # 主面板保持开启；全局热键仍在前台浮窗失焦前冻结画面。
         immediate = hotkey
@@ -1187,6 +1195,7 @@ class Controller(QObject):
     # ---- GIF 录制 ----
     def start_gif(self, sel, scr):
         """把选区录成 GIF 动图（Pillow 合成，10fps）。"""
+        self._interrupt_task_nudge()
         from gifrec import GifBar, missing_deps
         miss = missing_deps()
         if miss:
@@ -1338,6 +1347,8 @@ class Controller(QObject):
                 dialog.showNormal()
             dialog.raise_()
             dialog.activateWindow()
+            if arg == "today_reminders":
+                dialog.focus_nudges()
             return
         current = C.load_settings()
         dialog = W.AppSettingsDialog(current, EX.autostart_enabled(), parent=self.panel)
@@ -1363,6 +1374,9 @@ class Controller(QObject):
                 if self._shot_notify.isVisible():
                     C.position_screen_notice(self._shot_notify, self.S)
                 self._toast.hide()
+                nudges = getattr(self.tasks, "today_nudges", None)
+                if nudges is not None:
+                    nudges.interrupt()
                 label = dict(C.TOAST_CORNERS)[corner]
                 _show_dialog_toast(dialog, f"提示将显示在{label}", delay=0, settings=self.S)
 
@@ -1372,6 +1386,27 @@ class Controller(QObject):
             if saved:
                 label = next(label for key, label, _ in C.SHOT_CURSOR_STYLES if key == cursor)
                 dialog.info.setText(f"已保存 · 下次框选使用{label}指针。")
+
+        def select_nudges(changes):
+            from task_nudge_policy import DEFAULTS, PREFIX
+            keys = {PREFIX + key for key in DEFAULTS}
+            if not changes or not set(changes) <= keys:
+                return
+            try:
+                settings = C.load_settings()
+                settings.update(changes)
+                C.save_settings(settings)
+            except OSError:
+                dialog.nudge_controls.set_configuration(self.S)
+                dialog.info.setText("提醒设置未能保存，请重试。")
+                return
+            for key in keys:
+                self.S[key] = settings.get(key, C.DEFAULTS[key])
+            dialog.nudge_controls.set_configuration(self.S)
+            nudges = getattr(self.tasks, "today_nudges", None)
+            if nudges is not None:
+                nudges.configure()
+            dialog.info.setText("提醒设置已保存，下次启动继续使用。")
 
         def edit_hotkeys():
             self.hotkeys()
@@ -1388,6 +1423,7 @@ class Controller(QObject):
         dialog.positionSelected.connect(select_position)
         dialog.cursorSelected.connect(select_cursor)
         dialog.autostartToggled.connect(lambda on: self.set_autostart(on, dialog))
+        dialog.taskNudgeChanged.connect(select_nudges)
         dialog.finished.connect(finished)
         area = self.panel.screen().availableGeometry()
         x = max(area.left() + 12, min(self.panel.frameGeometry().right() - dialog.width(),
@@ -1398,6 +1434,8 @@ class Controller(QObject):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+        if arg == "today_reminders":
+            dialog.focus_nudges()
 
     def set_autostart(self, on, dialog=None):
         ok, error = EX.autostart(on)
@@ -1435,6 +1473,9 @@ class Controller(QObject):
             if self._shot_notify.isVisible():
                 C.position_screen_notice(self._shot_notify, self.S)
             self._toast.hide()
+            nudges = getattr(self.tasks, "today_nudges", None)
+            if nudges is not None:
+                nudges.interrupt()
             label = dict(C.TOAST_CORNERS)[corner]
             _show_dialog_toast(dialog, f"提示将显示在{label}", delay=0, settings=self.S)
 
@@ -1499,6 +1540,7 @@ class Controller(QObject):
         """R105：启动滚动拼接条——热键路径（pick_region 框完）与截图工具条入口（选区已现成）共用。"""
         if sel is None:
             return
+        self._interrupt_task_nudge()
         self.long_bar = LongShotBar(on_finish=self.long_finished, on_cancel=self._long_cancelled,
                                      on_edit=self.long_edit, region=sel, screen=scr)
 
@@ -1522,6 +1564,7 @@ class Controller(QObject):
         """纯框选范围（不进标注）；cb(sel, screen)，Esc 取消 cb(None, None)。"""
         if self._panel_capture_ticket is not None or self.shot_overlays or self._cp_active:
             return
+        self._interrupt_task_nudge()
         # 录屏热键同截图：先冻结前台画面和窗口位置，保留原应用的临时浮窗。
         immediate = hotkey
         frozen = freeze_screens() if immediate else None
@@ -1600,6 +1643,7 @@ class Controller(QObject):
         """独立入口和截图工具条共用已选定的录屏区域；取消选区不打开录屏。"""
         if sel is None:
             return
+        self._interrupt_task_nudge()
         self.rec_bar = RecBar(on_done=self.rec_finished, on_error=self.rec_error,
                               sel=sel, scr=scr)
 
@@ -1618,6 +1662,7 @@ class Controller(QObject):
         """屏幕取色器：冻结屏+放大镜逐像素取色；左键复制 HEX，右键/Esc 取消。"""
         if self._cp_active or self._panel_capture_ticket is not None or self.shot_overlays:
             return
+        self._interrupt_task_nudge()
         self._cp_active = True
         self._cp_generation += 1
         self._begin_panel_capture()
@@ -7423,14 +7468,14 @@ def smoke():
         import longshot as _LS119
         import panel as _PN119
 
-        # compose_columns：两栏顶对齐，短栏底部黑色填充（用户指定语义，R117 起）
+        # compose_columns：两栏顶对齐，短栏底部延续自身底色。
         _red119 = _np119.full((800, 300, 3), (200, 30, 30), dtype=_np119.uint8)
         _blu119 = _np119.full((400, 320, 3), (30, 30, 200), dtype=_np119.uint8)
         _cmp119 = _LS119.compose_columns(_red119, _blu119)
         _okC = (_cmp119.shape == (800, 620, 3)
                 and _np119.array_equal(_cmp119[:, :300], _red119)          # 左栏顶对齐贯到底
                 and _np119.array_equal(_cmp119[:400, 300:], _blu119)       # 右栏顶对齐
-                and int(_cmp119[400:, 300:].max()) == 0)                   # 短栏底部纯黑
+                and _np119.all(_cmp119[400:, 300:] == (30, 30, 200)))       # 短栏延续蓝色背景
 
         # 单栏进条 → 切换钮转双栏 → 左右栏独立滚动（左 3 步右 2 步；步长 150 ≤ 174 推导同 R117）
         _pgL = _det_noise(900, 300, 7)         # R120 确定性噪声
@@ -7470,7 +7515,7 @@ def smoke():
                     and _out119.shape == (750, 600, 3)
                     and _np119.array_equal(_out119[:, :300], _cL.long)       # 左半=左栏全长
                     and _np119.array_equal(_out119[:600, 300:], _cR.long)    # 右栏顶对齐
-                    and int(_out119[600:, 300:].max()) == 0                  # 右栏短 150 行→补黑
+                    and _out119[600:, 300:].any()                            # 复杂背景柔和补齐
                     and _b119.divider_locked())                              # 已拼内容→分栏线锁定
             _okD = _okD and _b119.commit_divider(0.7) is False and abs(_b119._div - 0.5) < 1e-9
             _b119.bcols.click()                                              # 切回单栏（保留已拼内容）

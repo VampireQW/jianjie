@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 APP_NAME = "简截"
 APP_VERSION = "4.13.7-win.1"
-APP_BUILD_ID = "R296"
+APP_BUILD_ID = "R300"
 
 
 def utility_window_flags(on_top=False):
@@ -484,6 +484,10 @@ DEFAULTS = {
     "hotkey_rec": "Ctrl+Alt+R",
     "rec_fps": 30,             # 录屏帧率：30 / 40 / 50 / 60
     "toast_corner": "bottom_right",
+    "task_nudge_enabled": False,
+    "task_nudge_interval": 60,
+    "task_nudge_start": "09:00",
+    "task_nudge_end": "18:00",
     "shot_cursor": "crosshair",
     "phone_receive_enabled": False,
     "pomodoro_work": 25,
@@ -854,6 +858,7 @@ class CaptureRightCancel(QObject):
         self.owner = owner
         self.cancel = cancel
         self._pressed = False
+        self._suspended = False
         self._timer = QTimer(self)
         self._timer.setInterval(32)
         self._timer.timeout.connect(self._poll)
@@ -868,19 +873,28 @@ class CaptureRightCancel(QObject):
         return bool(ctypes.windll.user32.GetAsyncKeyState(0x02) & 0x8000)
 
     def _poll(self):
+        if self._suspended:
+            return
         down = self._right_down()
         pressed, self._pressed = self._pressed, down
         if down and not pressed and self.owner.isVisible():
             self.cancel()
 
+    def set_suspended(self, suspended):
+        self._suspended = bool(suspended)
+        self._timer.stop()
+        if not self._suspended and self._live and self.owner.isVisible():
+            self._pressed = self._right_down()
+            self._timer.start()
+
     def eventFilter(self, obj, ev):
         if obj is self.owner:
-            if ev.type() == QEvent.Show and self._live:
+            if ev.type() == QEvent.Show and self._live and not self._suspended:
                 self._pressed = self._right_down()
                 self._timer.start()
             elif ev.type() in (QEvent.Hide, QEvent.Close):
                 self._timer.stop()
-        if (ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.RightButton
+        if (not self._suspended and ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.RightButton
                 and self.owner.isVisible() and isinstance(obj, QWidget)
                 and (obj is self.owner or self.owner.isAncestorOf(obj))):
             self._pressed = True

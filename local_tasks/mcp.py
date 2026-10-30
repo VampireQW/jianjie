@@ -38,9 +38,9 @@ def serve(input_stream=None, output_stream=None, invoke=call):
             if method == "initialize":
                 requested = params.get("protocolVersion")
                 result = {"protocolVersion": requested if requested in VERSIONS else VERSIONS[0],
-                          "serverInfo": {"name": "jianjie-local-tasks", "version": "1.0.0"},
+                          "serverInfo": {"name": "jianjie-local-tasks", "version": "1.1.0"},
                           "capabilities": {"tools": {}},
-                          "instructions": "仅管理简截本机任务。拆解由 Agent 完成。新增默认待办，明确今天才入今日；修改先查询真实 ID/version。工具结果确认落盘后才报告成功。"}
+                          "instructions": "仅管理简截本机任务。拆解由 Agent 完成。新增默认待办，明确今天才入今日；修改先查询真实 ID/version。写入离线时会保存本机队列，简截启动并开启本地 MCP 后自动提交。delivery_status=queued 只代表等待提交，必须明确告知用户尚未写入清单；用 jianjie_queue 查询结果。仅 applied 才报告已添加或已修改。冲突不得自动覆盖；重试复用原 request_id。后台提交不会自行触发 Agent 发言。"}
                 initialized = True
             elif method == "ping":
                 result = {}
@@ -91,7 +91,12 @@ def main():
             value = {"ok": False, "code": getattr(error, "code", "invalid_arguments"), "error": str(error)}
         print(json.dumps(value, ensure_ascii=False))
         return 0 if value.get("ok") else 1
-    serve()
+    from .outbox import OutboxWorker
+    worker = OutboxWorker().start()
+    try:
+        serve()
+    finally:
+        worker.stop()
     return 0
 
 

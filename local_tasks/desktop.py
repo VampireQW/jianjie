@@ -37,6 +37,14 @@ def install():
                     ctl.tray.showMessage("简截 · 任务归并", self.migration_report["error"])
                 if ctl.S.get("local_mcp_enabled", False):
                     self.set_agent_enabled(True)
+                from task_nudges import TodayNudges
+                self.today_nudges = TodayNudges(self, ctl)
+
+        def _arm_reminders(self):
+            super()._arm_reminders()
+            nudges = getattr(self, "today_nudges", None)
+            if nudges is not None:
+                nudges.changed()
 
         def set_agent_enabled(self, enabled):
             if enabled and self._bridge is None:
@@ -44,6 +52,8 @@ def install():
             elif not enabled and self._bridge is not None:
                 self._bridge.close()
                 self._bridge = None
+            if self.widget is not None:
+                self.widget.refresh_mcp_status()
 
         def agent_enabled(self):
             return self._bridge is not None
@@ -53,6 +63,9 @@ def install():
                 self._day = today()
                 if self.widget:
                     self.widget.rebuild()
+                nudges = getattr(self, "today_nudges", None)
+                if nudges is not None:
+                    nudges.changed()
 
         def move_task(self, tid, target):
             task = self.tasks.get(tid)
@@ -66,6 +79,18 @@ def install():
             super().__init__(manager)
             self.setMinimumWidth(340)
             self.title.setText("我的任务")
+            self._mcp_info = None
+            header = self.head.layout()
+            header.setSpacing(4)
+            self.mcp_button = QPushButton('MCP', self.head)
+            self.mcp_button.setObjectName('taskMcpEntry')
+            self.mcp_button.setAutoDefault(False)
+            self.mcp_button.setFixedSize(42, 28)
+            self.mcp_button.setCursor(Qt.PointingHandCursor)
+            self.mcp_button.setAccessibleName('MCP 连接信息')
+            self.mcp_button.clicked.connect(self.show_mcp_info)
+            header.insertWidget(header.indexOf(self.btn_pin), self.mcp_button)
+            self.refresh_mcp_status()
             self.tabs = QWidget(self.body)
             layout = QHBoxLayout(self.tabs)
             layout.setContentsMargins(2, 0, 2, 4)
@@ -88,6 +113,41 @@ def install():
                                     "QPushButton:hover {border-color:#60a5fa;}")
             self.rebuild()
 
+        def refresh_mcp_status(self):
+            enabled = bool(getattr(self.manager, 'agent_enabled', lambda: False)())
+            self.mcp_button.setToolTip(('本地 MCP 已开启' if enabled else '本地 MCP 未开启')+' · 点击复制 Agent 接入配置')
+            self.mcp_button.setStyleSheet(
+                'QPushButton#taskMcpEntry{border:none;border-radius:6px;padding:0;font-size:11px;font-weight:600;'
+                +('color:#9cc6ff;background:rgba(59,130,246,28);}' if enabled else
+                  'color:#a4afc1;background:rgba(255,255,255,10);}')
+                +'QPushButton#taskMcpEntry:hover{color:#e2eeff;background:rgba(96,165,250,38);}'
+                'QPushButton#taskMcpEntry:pressed{background:rgba(96,165,250,54);}')
+            if self._mcp_info is not None:
+                self._mcp_info.refresh_status()
+
+        def show_mcp_info(self):
+            dialog = self._mcp_info
+            if dialog is None:
+                from .info import McpInfoDialog
+                dialog = McpInfoDialog(self.manager, self)
+                self._mcp_info = dialog
+                dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+
+                def forget(_object=None):
+                    if self._mcp_info is dialog:
+                        self._mcp_info = None
+
+                dialog.destroyed.connect(forget)
+                area = self.screen().availableGeometry()
+                x = max(area.left()+12, min(self.frameGeometry().right()-dialog.width(), area.right()-dialog.width()-12))
+                y = max(area.top()+12, min(self.frameGeometry().top()+42, area.bottom()-dialog.height()-12))
+                dialog.move(x, y)
+            dialog.refresh_status()
+            dialog.showNormal() if dialog.isMinimized() else dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            C.force_foreground(dialog)
+
         def select_tab(self, key):
             if self._editing is not None:
                 self.inp.setFocus()
@@ -96,6 +156,9 @@ def install():
             self.manager.win["task_tab"] = key
             self.rebuild()
             self.manager.save()
+            nudges = getattr(self.manager, "today_nudges", None)
+            if key == "today" and nudges is not None and self.isActiveWindow():
+                nudges.reviewed()
 
         def rebuild(self):
             super().rebuild()

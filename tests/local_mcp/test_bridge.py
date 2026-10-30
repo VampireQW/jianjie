@@ -16,6 +16,65 @@ from PySide6.QtWidgets import QApplication
 
 
 class BridgeTest(unittest.TestCase):
+    def test_agent_exits_before_gui_starts_and_gui_submits_saved_request(self):
+        from local_tasks.desktop import install
+        from local_tasks.bridge import Bridge
+        from local_tasks.outbox import Outbox
+        import common as C
+        import storage
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory(prefix="JianjieOfflineBridge-") as directory:
+            previous_home = os.environ.get("JJ_MCP_HOME")
+            previous_tasks = C.TASKS_PATH
+            os.environ["JJ_MCP_HOME"] = directory
+            C.TASKS_PATH = str(Path(directory) / "tasks.json")
+            manager, bridge = None, None
+            try:
+                executable = os.environ.get("JJ_MCP_EXE")
+                command = [executable, "--mcp"] if executable else [sys.executable,
+                    str(Path(__file__).resolve().parents[2] / "main.pyw"), "--mcp"]
+                args = {"request_id": "before-gui-001", "tasks": [{"text": "先开 Agent 的离线请求", "target": "today"}]}
+                result = subprocess.run(command + ["--call", "jianjie_create_tasks", json.dumps(args)],
+                                        capture_output=True, encoding="utf-8", timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["delivery_status"], "queued")
+                self.assertFalse(Path(C.TASKS_PATH).exists())
+                Manager, _ = install()
+                manager = Manager()
+                self.assertFalse(manager.agent_enabled())
+                # Opening the task manager does not implicitly enable MCP or apply jobs.
+                for _ in range(5):
+                    app.processEvents()
+                self.assertFalse(manager.tasks)
+                bridge = Bridge(manager, storage.atomic_json)
+                deadline = time.monotonic() + 8
+                box = Outbox()
+                while box.get(args["request_id"])["state"] != "applied" and time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+                self.assertEqual(box.get(args["request_id"])["state"], "applied")
+                self.assertEqual(len(manager.tasks), 1)
+                saved = json.loads(Path(C.TASKS_PATH).read_text(encoding="utf-8"))
+                self.assertEqual(saved["tasks"][0]["text"], args["tasks"][0]["text"])
+                # The same executable can reconnect after enable without duplicating.
+                check = subprocess.run(command + ["--call", "jianjie_queue", json.dumps({
+                    "action": "get", "request_id": args["request_id"]})],
+                    capture_output=True, encoding="utf-8", timeout=30)
+                self.assertEqual(json.loads(check.stdout)["request"]["state"], "applied")
+            finally:
+                if bridge:
+                    bridge.close()
+                    bridge.outbox_worker.thread.join(1)
+                if manager:
+                    manager._date_timer.stop()
+                    manager._reminder_timer.stop()
+                app.processEvents()
+                C.TASKS_PATH = previous_tasks
+                if previous_home is None:
+                    os.environ.pop("JJ_MCP_HOME", None)
+                else:
+                    os.environ["JJ_MCP_HOME"] = previous_home
+
     def test_authenticated_mcp_to_gui(self):
         from local_tasks.desktop import install
         from local_tasks.bridge import Bridge
@@ -60,8 +119,17 @@ class BridgeTest(unittest.TestCase):
                     assert result.returncode == 0, result.stderr
                     responses = [json.loads(line) for line in result.stdout.splitlines()]
                     assert len(responses) == 3
-                    assert len(responses[1]["result"]["tools"]) == 5
+                    assert len(responses[1]["result"]["tools"]) == 6
                     value = responses[2]["result"]["structuredContent"]
+                    if value.get("queued"):
+                        from local_tasks.outbox import Outbox
+                        deadline = time.monotonic() + 10
+                        while time.monotonic() < deadline:
+                            record = Outbox().get("bridge-create")
+                            if record["state"] == "applied":
+                                value = record["result"]
+                                break
+                            time.sleep(0.02)
                     assert value["ok"], value
                     assert value["tasks"][0]["text"] == "MCP 中文端到端测试"
                     outcome["value"] = value

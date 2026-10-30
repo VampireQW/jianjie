@@ -1030,9 +1030,12 @@ class AppSettingsDialog(CardDialog):
     positionSelected = Signal(str)
     cursorSelected = Signal(str)
     autostartToggled = Signal(bool)
+    taskNudgeChanged = Signal(dict)
 
     def __init__(self, settings, autostart=False, parent=None):
         super().__init__("设", "设置", parent=parent)
+        from polished_controls import crisp_window_shadow
+        crisp_window_shadow(self, self.body)
         self.setWindowModality(Qt.NonModal)
         self.setFixedWidth(480)
         screen = self.screen() or QGuiApplication.primaryScreen()
@@ -1041,6 +1044,7 @@ class AppSettingsDialog(CardDialog):
         self.setMinimumHeight(340)
 
         scroll = QScrollArea(self.body)
+        self.settings_scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         content = QWidget()
@@ -1120,6 +1124,16 @@ class AppSettingsDialog(CardDialog):
         positions.addLayout(grid)
         self.set_corner(settings.get("toast_corner", "bottom_right"))
 
+        from jj_variant import LITE
+        self.nudge_controls = None
+        if not LITE:
+            from task_nudges import NudgeSettings
+            frame, reminders = section("今日待办轻提醒")
+            self.nudge_section = frame
+            self.nudge_controls = NudgeSettings(frame, settings, _PhoneReceiveSwitch)
+            self.nudge_controls.changed.connect(self.taskNudgeChanged.emit)
+            reminders.addWidget(self.nudge_controls)
+
         frame, cursors = section("截图框选指针")
         choices = QHBoxLayout()
         choices.setSpacing(8)
@@ -1169,6 +1183,10 @@ class AppSettingsDialog(CardDialog):
         blocked = self.autostart_button.blockSignals(True)
         self.autostart_button.setChecked(enabled)
         self.autostart_button.blockSignals(blocked)
+
+    def focus_nudges(self):
+        if self.nudge_controls is not None:
+            QTimer.singleShot(0, lambda: self.settings_scroll.ensureWidgetVisible(self.nudge_section))
 
 
 _PHONE_QR_SIDE = 192

@@ -22,6 +22,9 @@ class LongShotBottomTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        cursor = patch("longshot.QCursor.setPos")
+        cursor.start()
+        self.addCleanup(cursor.stop)
         rng = np.random.default_rng(205)
         self.left_page = rng.integers(0, 256, (1200, 220, 3), dtype=np.uint8)
         self.right_page = rng.integers(0, 256, (1200, 220, 3), dtype=np.uint8)
@@ -52,7 +55,7 @@ class LongShotBottomTests(unittest.TestCase):
         np.testing.assert_array_equal(result[:, 220:], np.vstack((
             self.right_page[:300], self.fixed_panel[:180])))
         self.assertEqual(result.shape, (480, 440, 3))
-        self.assertFalse(result[360:, :220].any())
+        self.assertTrue(result[360:, :220].any())
 
     def test_scrolling_column_without_bottom_panel_still_matches(self):
         state = _ColumnState(self.left_page[:360].copy())
@@ -84,7 +87,7 @@ class LongShotBottomTests(unittest.TestCase):
         np.testing.assert_array_equal(result[:, :220], self.left_page[:540])
         np.testing.assert_array_equal(result[:480, 220:], np.vstack((
             self.right_page[:300], self.fixed_panel[:180])))
-        self.assertFalse(result[480:, 220:].any())
+        self.assertTrue(result[480:, 220:].any())
 
     def test_matching_content_after_footer_removal_does_not_skip_rows(self):
         footer = self.fixed_panel[:40]

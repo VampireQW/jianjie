@@ -49,6 +49,48 @@ def fingerprint(task):
                       sort_keys=True, ensure_ascii=False)
 
 
+WRITE_TOOLS = ("jianjie_create_tasks", "jianjie_update_tasks", "jianjie_undo")
+
+
+def request_digest(name, args):
+    return hashlib.sha256(json.dumps([name, args], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def validate_write(name, args):
+    """Validate offline requests without loading or changing any task data."""
+    if name not in WRITE_TOOLS:
+        raise TaskError("未知写入工具", "unknown_tool")
+    check_keys(args, {"jianjie_create_tasks": ("request_id", "tasks"),
+                      "jianjie_update_tasks": ("request_id", "updates"),
+                      "jianjie_undo": ("request_id", "batch_id")}[name])
+    rid = args.get("request_id")
+    if not isinstance(rid, str) or not 8 <= len(rid) <= 128:
+        raise TaskError("写入操作需要 8—128 字符的 request_id；重试使用同一值")
+    if name == "jianjie_undo":
+        if not isinstance(args.get("batch_id"), str) or not 1 <= len(args["batch_id"]) <= 128:
+            raise TaskError("batch_id 须为有效的操作 ID")
+        return
+    rows = args.get("tasks" if name == "jianjie_create_tasks" else "updates")
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 50:
+        raise TaskError("每批须包含 1—50 条任务")
+    seen = set()
+    for row in rows:
+        if name == "jianjie_create_tasks":
+            TaskService.fields(row, True)
+        else:
+            check_keys(row, ("id", "version", "patch"))
+            tid, version = row.get("id"), row.get("version")
+            if not isinstance(tid, str) or not 1 <= len(tid) <= 128:
+                raise TaskError("id 须为查询返回的真实任务 ID")
+            if tid in seen:
+                raise TaskError("同一批不能重复修改同一任务")
+            seen.add(tid)
+            if type(version) is not int or version < 1:
+                raise TaskError("version 须为查询返回的正整数")
+            if not TaskService.fields(row.get("patch")):
+                raise TaskError("patch 不能为空")
+
+
 def public(task):
     return {"id": task["id"], "text": task["text"], "priority": task.get("prio", 0),
             "plan_date": task.get("plan_date"), "due_date": task.get("due_date") or None,
@@ -60,7 +102,9 @@ class TaskService:
     def __init__(self, manager):
         self.manager = manager
 
-    def execute(self, name, args):
+    def execute(self, name, args, reference_day=None):
+        if reference_day is not None:
+            reference_day = day(reference_day)
         m = self.manager
         m._load()
         m.refresh_versions()
@@ -70,15 +114,16 @@ class TaskService:
                     "application": "简截", "api_version": 1}
         if name == "jianjie_list_tasks":
             return self.list_tasks(args)
-        if name not in ("jianjie_create_tasks", "jianjie_update_tasks", "jianjie_undo"):
+        if name not in WRITE_TOOLS:
             raise TaskError("未知工具", "unknown_tool")
+        validate_write(name, args)
         if m.widget and (getattr(m.widget, "_editing", None) is not None or
                          any(getattr(r, "_completing", False) for r in m.widget.rows())):
             raise TaskError("简截正在编辑或完成任务，请稍后用原 request_id 重试", "busy")
         request_id = args.get("request_id")
         if not isinstance(request_id, str) or not 8 <= len(request_id) <= 128:
             raise TaskError("写入操作需要 8—128 字符的 request_id；重试使用同一值")
-        digest = hashlib.sha256(json.dumps([name, args], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        digest = request_digest(name, args)
         cached = m.agent_meta.setdefault("receipts", {}).get(request_id)
         if cached:
             if cached["digest"] != digest:
@@ -88,9 +133,9 @@ class TaskService:
         meta_before = copy.deepcopy(m.agent_meta)
         try:
             if name == "jianjie_create_tasks":
-                result = self.create(args)
+                result = self.create(args, reference_day)
             elif name == "jianjie_update_tasks":
-                result = self.update(args)
+                result = self.update(args, reference_day)
             else:
                 result = self.undo(args)
             # 版本在返回前固定，UI 编辑也使用同一版本递增规则。
@@ -154,7 +199,8 @@ class TaskService:
                 "tasks": [public(t) for t in rows[offset:offset + limit]],
                 "next_offset": offset + limit if offset + limit < len(rows) else None}
 
-    def fields(self, value, creating=False):
+    @staticmethod
+    def fields(value, creating=False, reference_day=None):
         check_keys(value, ("text", "priority", "target", "plan_date", "due_date", "done", "deleted"))
         result = {}
         if creating or "text" in value:
@@ -174,7 +220,7 @@ class TaskService:
                 raise TaskError("target 须为 today 或 backlog")
             if "plan_date" in value:
                 raise TaskError("target 与 plan_date 只能传一个")
-            result["plan_date"] = today() if value["target"] == "today" else None
+            result["plan_date"] = (reference_day or today()) if value["target"] == "today" else None
         elif "plan_date" in value:
             result["plan_date"] = day(value["plan_date"])
         elif creating:
@@ -186,12 +232,12 @@ class TaskService:
             result["remind_offset"] = None
         return result
 
-    def create(self, args):
+    def create(self, args, reference_day=None):
         check_keys(args, ("request_id", "tasks"))
         tasks = args.get("tasks")
         if not isinstance(tasks, list) or not 1 <= len(tasks) <= 50:
             raise TaskError("tasks 须包含 1—50 条任务")
-        values = [self.fields(t, True) for t in tasks]
+        values = [self.fields(t, True, reference_day) for t in tasks]
         order = min((t.get("order", 0) for t in self.manager.tasks.values()), default=0) - len(values)
         created = []
         for i, fields in enumerate(values):
@@ -204,7 +250,7 @@ class TaskService:
             created.append(task)
         return {"tasks": created}
 
-    def update(self, args):
+    def update(self, args, reference_day=None):
         check_keys(args, ("request_id", "updates"))
         updates = args.get("updates")
         if not isinstance(updates, list) or not 1 <= len(updates) <= 50:
@@ -221,7 +267,7 @@ class TaskService:
             task = self.manager.tasks[tid]
             if type(version) is not int or version != task.get("version", 1):
                 raise TaskError("任务已变化，请重新查询后修改", "conflict", public(task))
-            fields = self.fields(update.get("patch"))
+            fields = self.fields(update.get("patch"), reference_day=reference_day)
             if not fields:
                 raise TaskError("patch 不能为空")
             if task.get("deleted") and fields.get("deleted") is not False:

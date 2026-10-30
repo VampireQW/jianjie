@@ -26,6 +26,8 @@ venv/
 *.db
 *.db-wal
 *.db-shm
+*.sqlite3
+*.sqlite3-journal
 settings.json
 tasks.json
 storage-locations.json

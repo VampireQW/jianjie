@@ -1586,6 +1586,9 @@ class TaskManager:
                 task["updated"] = now
                 ready.append(task)
         if ready:
+            nudges = getattr(self, "today_nudges", None)
+            if nudges is not None:
+                nudges.exact_reminder()
             self.save()  # 通知前保存已提醒标记，重启后不会重复弹出
             if self.widget is not None:
                 self.widget.rebuild()

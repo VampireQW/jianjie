@@ -6,17 +6,20 @@ R107：模板匹配由 cv2 换成纯 numpy 实现——轻量包（截图+长截
 实测与 cv2.TM_CCOEFF_NORMED 定位坐标全场景一致，且耗时更低（列压缩少 16 倍乘加）。
 
 R117/R119：双栏长截图——选区分左右两栏各跑一套独立拼接状态机（左栏滚时只有左半帧变，
-滚动归属天然按帧内容区分，不猜光标）；合成时两栏顶对齐，短栏底部按用户指定用黑色填充。
+滚动归属天然按帧内容区分，不猜光标）；合成时两栏顶对齐，短栏底部自动延续背景，可手动取色。
 R119 收编进长截图本体：拼接条上切换钮即时切单/双栏（保留已拼内容），独立入口全撤。"""
 import numpy as np
 from PySide6.QtCore import QEvent, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import (QColor, QCursor, QGuiApplication, QIcon, QImage, QPainter,
                            QPainterPath, QPixmap, QPen)
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import (QAbstractSpinBox, QColorDialog, QDialogButtonBox, QFrame, QHBoxLayout,
+                               QLabel, QPushButton, QWidget)
 
 import common as C
 import icons
 from common import pictures_dir, timestamp
+from longshot_fill import ColumnFill, FillStyle, compose_columns
+from longshot_fill_ui import FillButton, FillColorPopup
 
 
 _MIN_COLUMN_FRACTION = 0.1
@@ -308,7 +311,7 @@ class LongShotBar(QWidget):
         self.stat.setObjectName("dim")
         bedit = icons.tool_button("pen", "编辑：停止拼接，进编辑器标注长图", self.edit,
                                   color="#f59e0b", dpr=dpr)
-        bcols = icons.tool_button("cols", "双栏模式：左右两栏各自滚动拼一张（短栏补黑）",
+        bcols = icons.tool_button("cols", "双栏模式：左右两栏独立滚动，短栏自动补齐底色",
                                   self.toggle_dual, color="#38bdf8", checkable=True, dpr=dpr)   # R119
         bsave = icons.tool_button("save", "完成并保存到本地目录（不复制）",
                                   lambda: self.finish(copy=False), color="#60a5fa", dpr=dpr)
@@ -319,11 +322,20 @@ class LongShotBar(QWidget):
         b3.setEnabled(False)
         self.bedit, self.b_cancel, self.b_fin, self.b_save = bedit, b2, b3, bsave
         self.bcols = bcols
+        self._padding = (ColumnFill(), ColumnFill())
+        self._fill_popup = None
+        self._fill_color_dialog = None
+        self._fill_picking = False
+        self._fill_closing = False
+        self._fill_timer_was_active = False
+        self.bfill = FillButton(self)
+        self.bfill.hide()
         lay.addWidget(self.dot)
         lay.addWidget(self.msg)
         lay.addWidget(self.stat)
         sep()
         lay.addWidget(bcols)                           # R119 单/双栏切换（checked=双栏态）
+        lay.addWidget(self.bfill)
         lay.addWidget(bedit)
         lay.addWidget(bsave)                           # ⬇ 直接存本地目录
         lay.addWidget(b2)                              # × 在前，对号收尾最右
@@ -388,6 +400,11 @@ class LongShotBar(QWidget):
             self._halo = None
 
     def closeEvent(self, ev):
+        self._fill_closing = True
+        if self._fill_popup is not None:
+            self._fill_popup.hide()
+        if self._fill_color_dialog is not None:
+            self._fill_color_dialog.reject()
         self._close_halo()
         self._close_divider()                    # R119 分栏拖柄随条关闭
         if getattr(self, "_preview", None):
@@ -434,6 +451,8 @@ class LongShotBar(QWidget):
             cx, cy = g.center().x(), g.center().y()
         QCursor.setPos(cx, cy)             # 光标先落进区域：紧接着的滚轮才会滚到页面上
         self._dual = False                 # 每次进条默认单栏，双栏由切换钮即时开（R119）
+        self._padding = (ColumnFill(), ColumnFill())
+        self.bfill.hide()
         self.bcols.setChecked(False)
         self._colL = None
         self._colR = None
@@ -444,7 +463,9 @@ class LongShotBar(QWidget):
         self.update_stat()
 
     def grab(self):
-        if not self.running or (self._divider is not None and self._divider._dragging):
+        if (not self.running or self._fill_picking
+                or (self._fill_popup is not None and self._fill_popup.isVisible())
+                or (self._divider is not None and self._divider._dragging)):
             return
         try:
             frame = grab_array(self.screen(), self.region)
@@ -498,11 +519,14 @@ class LongShotBar(QWidget):
     # ---- R119 双栏模式（条上切换钮即时切，保留已拼内容）----
     def toggle_dual(self):
         """单/双栏切换：单→双按分栏线纵切长图与最近帧重建两套状态机（拼接进度语义继承）；
-        双→单两栏顶对齐合成回整图（短栏补黑随图带走），分栏拖柄随模式出现/关闭。"""
+        双→单两栏顶对齐合成回整图，补齐背景随图带走，分栏拖柄随模式出现/关闭。"""
         if self.long_arr is None or self._prev is None:
             return
         if self.bcols.isChecked():
             self._dual = True
+            self.bfill.show()
+            for model in self._padding:
+                model.reset()
             dx = self._dx()
             self._colL = _ColumnState(self.long_arr[:, :dx].copy())
             self._colR = _ColumnState(self.long_arr[:, dx:].copy())
@@ -524,6 +548,9 @@ class LongShotBar(QWidget):
             self.msg.setText("双栏模式 · 左右栏各自向下慢滚，分栏线可拖")
         else:
             self._dual = False
+            self.bfill.hide()
+            if self._fill_popup is not None:
+                self._fill_popup.hide()
             if self._colL is not None:
                 self._appended = self._colL.appended or self._colR.appended  # 合成图已是拼接态
                 self._footer_h = (self._colL.footer_h
@@ -541,6 +568,7 @@ class LongShotBar(QWidget):
             self._preview.set_arr(self.long_arr)
             self.msg.setText("单栏模式 · 请向下慢滚，简截自动拼接")
         self.update_stat()
+        self.adjustSize()
 
     def _grab_dual(self, frame):
         """双栏态抓帧：左右栏各喂半帧——哪半变了哪半推进，静止半栏 prev 未变早退，不猜光标。"""
@@ -573,7 +601,106 @@ class LongShotBar(QWidget):
         return min(w - 8, max(8, round(w * self._div)))
 
     def _compose(self):
-        return compose_columns(self._colL.long, self._colR.long)
+        fills = [None, None]
+        if self._colL.long.shape[0] < self._colR.long.shape[0]:
+            fills[0] = self.padding_style(0)
+        elif self._colR.long.shape[0] < self._colL.long.shape[0]:
+            fills[1] = self.padding_style(1)
+        result = compose_columns(self._colL.long, self._colR.long, fills)
+        self.bfill.update()
+        return result
+
+    def padding_style(self, index):
+        column = (self._colL, self._colR)[index]
+        model = self._padding[index]
+        if column is None:
+            return FillStyle(model.manual) if model.manual is not None else model.style or FillStyle((230, 236, 245))
+        return model.resolve(column.long, column.footer_h)
+
+    def open_fill_colors(self):
+        if not self._dual or self._colL is None:
+            return
+        if self._fill_popup is not None and self._fill_popup.isVisible():
+            self._fill_popup.hide()
+            return
+        self._fill_timer_was_active = self.timer.isActive()
+        self.timer.stop()
+        self._right_cancel.set_suspended(True)
+        if self._fill_popup is None:
+            self._fill_popup = FillColorPopup(self)
+        self._fill_popup.show_at_button()
+        self.bfill.update()
+
+    def fill_editor_closed(self):
+        if self._fill_picking or self._fill_closing:
+            return
+        self._right_cancel.set_suspended(False)
+        if self._fill_timer_was_active and self.running and self.isVisible():
+            self.timer.start()
+        self._fill_timer_was_active = False
+
+    def set_fill_color(self, index, color):
+        if not self._dual or self._colL is None:
+            return False
+        self._padding[index].manual = tuple(map(int, color)) if color is not None else None
+        self._padding[index].reset()
+        self.long_arr = self._compose()
+        self._preview.set_arr(self.long_arr)
+        if self._fill_popup is not None:
+            self._fill_popup.refresh()
+        return True
+
+    def choose_fill_color(self, index):
+        if not self._dual or self._colL is None:
+            return
+        self._fill_picking = True
+        self._fill_timer_was_active |= self.timer.isActive()
+        self.timer.stop()
+        self._right_cancel.set_suspended(True)
+        if self._fill_popup is not None:
+            self._fill_popup.hide()
+        name = '左栏' if index == 0 else '右栏'
+        dialog = QColorDialog(QColor(*map(int, self.padding_style(index).color)), self)
+        self._fill_color_dialog = dialog
+        dialog.setWindowTitle(name+'补齐底色')
+        dialog.setWindowIcon(C.app_qicon())
+        dialog.setOption(QColorDialog.DontUseNativeDialog, True)
+        dialog.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        dialog.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
+        dialog.setStyleSheet('QColorDialog,QColorDialog QWidget{background:#181e2a;color:#dce8fa;border-radius:0;}'
+                            'QColorDialog QLabel{background:transparent;font-size:12px;}'
+                            'QColorDialog QLineEdit,QColorDialog QAbstractSpinBox{background:#223149;'
+                            'border:1px solid #43516a;border-radius:5px;padding:4px;}'
+                            'QColorDialog QPushButton{background:#283d5b;color:#e4efff;border:none;'
+                            'border-radius:6px;padding:7px 12px;}'
+                            'QColorDialog QPushButton:hover{background:#36557c;}')
+        translations = {'Pick Screen Color': '屏幕取色', 'Basic colors': '基本颜色', 'Custom colors': '自定义颜色',
+                        'Add to Custom Colors': '添加到自定义颜色', 'Hue:': '色相：', 'Sat:': '饱和度：',
+                        'Val:': '明度：', 'Red:': '红：', 'Green:': '绿：', 'Blue:': '蓝：', 'HTML:': '色值：'}
+        for widget in dialog.findChildren(QWidget):
+            if isinstance(widget, (QPushButton, QLabel)):
+                key = widget.text().replace('&', '').strip().rstrip(':')
+                for original, translated in translations.items():
+                    if key == original.rstrip(':'):
+                        widget.setText(translated)
+                        break
+        for box in dialog.findChildren(QDialogButtonBox):
+            for standard, text in ((QDialogButtonBox.Ok, '确定'), (QDialogButtonBox.Cancel, '取消')):
+                button = box.button(standard)
+                if button is not None:
+                    button.setText(text)
+        for spin in dialog.findChildren(QAbstractSpinBox):
+            spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        try:
+            if dialog.exec() == QColorDialog.Accepted:
+                color = dialog.selectedColor()
+                if color.isValid():
+                    self.set_fill_color(index, (color.red(), color.green(), color.blue()))
+        finally:
+            self._fill_color_dialog = None
+            self._fill_picking = False
+            dialog.deleteLater()
+            self.fill_editor_closed()
 
     def divider_locked(self):
         return bool(self._colL is not None
@@ -585,6 +712,8 @@ class LongShotBar(QWidget):
             self.msg.setText("已有拼接内容，分栏线不可再调")
             return False
         self._div = min(1 - _MIN_COLUMN_FRACTION, max(_MIN_COLUMN_FRACTION, frac))
+        for model in self._padding:
+            model.reset()
         dx = self._dx()
         prev = self._prev_full if self._prev_full is not None else self._prev
         self._colL = _ColumnState(self.long_arr[:, :dx].copy())
@@ -625,6 +754,8 @@ class LongShotBar(QWidget):
         self._colL = None
         self._colR = None
         self._footer_h = 0
+        for model in self._padding:
+            model.reset()
         if self._preview is not None:
             self._preview._pm = None
 
@@ -719,16 +850,6 @@ class _ColumnState:
             return 0, score
         self.prev = frame.copy()
         return -1, score
-
-
-def compose_columns(left, right):
-    """R117：左右栏顶对齐合成一张长图；短栏底部用黑色填充（用户指定语义）。"""
-    lh, lw = left.shape[:2]
-    rh, rw = right.shape[:2]
-    out = np.zeros((max(lh, rh), lw + rw, 3), dtype=np.uint8)
-    out[:lh, :lw] = left
-    out[:rh, lw:] = right
-    return out
 
 
 class _DividerHandle(QWidget):

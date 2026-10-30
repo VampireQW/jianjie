@@ -167,7 +167,7 @@ class TaskTests(unittest.TestCase):
         responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
         self.assertEqual(len(responses), 4)
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 5)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 6)
         self.assertEqual(responses[2]["result"]["structuredContent"]["tasks"][0]["text"], "中文任务")
         self.assertTrue(responses[3]["result"]["isError"])
 
