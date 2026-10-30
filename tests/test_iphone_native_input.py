@@ -16,6 +16,7 @@ WORK = ROOT / "build/iphone-native-input-tests"
 
 HARNESS = r'''
 #include <windows.h>
+#include <imm.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
@@ -29,6 +30,7 @@ static bool visible = true, iconic = false, event_exists = true, event_ready = t
 static bool raw_registered = false, clipped = false, timer_active = false;
 static int cursor_count = 2, opened = 0, closed = 0, waited = 0, raw_cleanup = 0;
 static int failure = 0, held[256] = {0}, assertions = 0;
+static HIMC associated_ime = (HIMC) 9;
 static ULONGLONG ticks = 0;
 static RAWINPUT incoming = {0};
 static std::vector<std::string> reports;
@@ -117,6 +119,11 @@ static UINT test_raw(HRAWINPUT, UINT command, LPVOID output, PUINT bytes, UINT h
 static LRESULT test_default(HWND, UINT message, WPARAM, LPARAM) {
     if (message == WM_INPUT) ++raw_cleanup; return 0;
 }
+static HIMC test_ime(HWND window, HIMC context) {
+    check(window == video, "IME routing changes only receiver window");
+    HIMC previous = associated_ime; associated_ime = context; return previous;
+}
+#define ImmAssociateContext test_ime
 #define puts test_puts
 #define printf test_printf
 #define GetEnvironmentVariableW test_env
@@ -157,6 +164,7 @@ static size_t lines(const char *prefix) {
     size_t count = 0; for (auto &line : reports) if (line.find(prefix) == 0) ++count; return count;
 }
 static void idle() {
+    check(associated_ime == (HIMC) 9, "original Windows IME context restored after capture");
     check(!raw_registered && !clipped && !capture_window && !timer_active && cursor_count == 2,
           "capture resources fully released and cursor counter balanced");
     check(opened == closed, "no leaked event handle");
@@ -186,6 +194,7 @@ static void begin() {
     check(state() && state()->captured && raw_registered && clipped && timer_active,
           "ready foreground Ctrl+Alt+M acquires all resources");
     check(cursor_count < 0 && has("JJ_AIRPLAY_CONTROL capture 1"), "capture announced and cursor hidden");
+    check(associated_ime == NULL, "local IME cannot consume phone's phonetic keystrokes");
 }
 static void raw(USHORT flags = 0, LONG x = 0, LONG y = 0, SHORT wheel = 0, USHORT kind = 0) {
     incoming = RAWINPUT{}; incoming.header.dwType = RIM_TYPEMOUSE;
@@ -221,6 +230,12 @@ int main() {
     }
     reset(); begin(); reports.clear(); message(WM_KEYDOWN, 'M'); message(WM_KEYUP, 'M');
     check(has("JJ_AIRPLAY_INPUT key 0 16 0 0 0 0 0"), "plain M remains a normal captured key");
+    reports.clear(); message(WM_KEYDOWN, VK_LCONTROL); message(WM_KEYDOWN, VK_SPACE);
+    message(WM_KEYUP, VK_SPACE); message(WM_KEYUP, VK_LCONTROL);
+    check(state()->captured && associated_ime == NULL &&
+          has("JJ_AIRPLAY_INPUT key 1 44 0 0 0 0 0") &&
+          reports.back() == "JJ_AIRPLAY_INPUT key 0 0 0 0 0 0 0",
+          "Ctrl+Space reaches phone input switch and releases cleanly");
     reports.clear(); held[VK_LCONTROL] = 1; message(WM_KEYDOWN, VK_LCONTROL);
     message(WM_KEYDOWN, 'M'); message(WM_KEYUP, 'M'); held[VK_LCONTROL] = 0; message(WM_KEYUP, VK_LCONTROL);
     check(state()->captured && has("JJ_AIRPLAY_INPUT key 1 16 0 0 0 0 0") && state()->pending_modifiers == 0,
@@ -449,6 +464,20 @@ int main() {
     JJInputState *state = (JJInputState *) GetPropW(parent, jj_input_key);
     check(state && !state->captured && !state->ready && !state->raw_mouse && !state->timer,
           "parent rejection holds no input resource or ready handle");
+    HIMC custom_ime = ImmCreateContext(); check(custom_ime != NULL, "private test IME context created");
+    HIMC original_ime = ImmAssociateContext(parent, custom_ime);
+    jj_input_route_keyboard(state, true);
+    check(state->ime_detached && !ImmGetContext(parent), "real HWND detaches only its Windows IME");
+    jj_input_route_keyboard(state, true);
+    jj_input_route_keyboard(state, false);
+    HIMC restored_ime = ImmGetContext(parent);
+    check(restored_ime == custom_ime && !state->ime_detached && !state->desktop_ime,
+          "real HWND restores exact previous IME context after repeated enter");
+    ImmReleaseContext(parent, restored_ime);
+    jj_input_route_keyboard(state, false);
+    restored_ime = ImmGetContext(parent); check(restored_ime == custom_ime, "repeated release leaves context intact");
+    ImmReleaseContext(parent, restored_ime);
+    ImmAssociateContext(parent, original_ime); check(ImmDestroyContext(custom_ime), "test IME context destroyed after detach");
     memset(keys, 0, sizeof(keys)); SetKeyboardState(keys);
     DestroyWindow(parent); check(!IsWindow(child) && !IsWindow(parent), "private HWND tree destroyed");
     check(SetThreadDesktop(original), "test thread restored to original desktop");
@@ -483,7 +512,7 @@ class NativeInputTests(unittest.TestCase):
         result = subprocess.run(
             [str(ZIG), "c++", "-target", "x86_64-windows-gnu", "-std=c++11", "-O2", "-g0",
              "-DNDEBUG", "-D_WIN32_WINNT=0x0a00",
-             str(source), "-luser32", "-o", str(executable)],
+             str(source), "-luser32", "-limm32", "-o", str(executable)],
             cwd=ROOT, env=self.env, capture_output=True, text=True, timeout=180,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -499,7 +528,7 @@ class NativeInputTests(unittest.TestCase):
         executable = WORK / "window_messages.exe"
         result = subprocess.run(
             [str(ZIG), "c++", "-target", "x86_64-windows-gnu", "-std=c++11", "-O2", "-g0",
-             "-DNDEBUG", "-D_WIN32_WINNT=0x0a00", str(source), "-luser32", "-o", str(executable)],
+             "-DNDEBUG", "-D_WIN32_WINNT=0x0a00", str(source), "-luser32", "-limm32", "-o", str(executable)],
             cwd=ROOT, env=self.env, capture_output=True, text=True, timeout=180,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

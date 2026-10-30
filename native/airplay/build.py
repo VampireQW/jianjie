@@ -146,7 +146,7 @@ def build():
     resource.write_text('101 ICON "_app.ico"\n', encoding='ascii')
     resource_binary = generated/'receiver.res'
     subprocess.run([str(ZIG),'rc','/fo',str(resource_binary),str(resource)],cwd=generated,check=True,env=env)
-    command=[str(ZIG),'c++',*flags,'-std=c++11','-s',str(source),*objects,str(resource_binary),'-L',str(SDK/'lib'),*[str(SDK/'lib'/('lib'+name+'.dll.a')) for name in libraries],'-lws2_32','-liphlpapi','-lshell32','-luser32','-ldxguid','-o',str(output/'receiver.exe')]
+    command=[str(ZIG),'c++',*flags,'-std=c++11','-s',str(source),*objects,str(resource_binary),'-L',str(SDK/'lib'),*[str(SDK/'lib'/('lib'+name+'.dll.a')) for name in libraries],'-lws2_32','-liphlpapi','-lshell32','-luser32','-limm32','-ldxguid','-o',str(output/'receiver.exe')]
     subprocess.run(command,check=True,env=env)
     with zipfile.ZipFile(output/'source.zip','w',zipfile.ZIP_DEFLATED) as z:
         for file in UPSTREAM.rglob('*'):

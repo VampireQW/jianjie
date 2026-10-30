@@ -1,6 +1,7 @@
 """Windows receiver window, explicit foreground input, and bounded video queues."""
 
 CONTROL_INPUT = r'''
+#include <imm.h>
 static const wchar_t *jj_input_key = L"JianJie.ForegroundInput";
 static const UINT_PTR jj_input_timer_id = 0x4a4a3008;
 struct JJMouseReport {
@@ -18,6 +19,8 @@ struct JJInputState {
     bool down[256], blocked_keys[256], swallowed_keys[256];
     unsigned char last_keys[7];
     bool keys_valid;
+    HIMC desktop_ime;
+    bool ime_detached;
     LONG wheel_remainder;
     JJMouseReport mouse[64];
     unsigned head, count;
@@ -25,6 +28,7 @@ struct JJInputState {
     JJInputState(HWND value) : window(value), ready(NULL), captured(false), raw_mouse(false),
         shortcut_latched(false), pending_modifiers(0),
         timer(0), cursor_hides(0), buttons(0), blocked_buttons(0), keys_valid(false),
+        desktop_ime(NULL), ime_detached(false),
         wheel_remainder(0), head(0), count(0), next_mouse_tick(0) {
         memset(down, 0, sizeof(down));
         memset(blocked_keys, 0, sizeof(blocked_keys));
@@ -40,6 +44,21 @@ static bool jj_input_foreground(HWND window) {
 
 static bool jj_input_ready(JJInputState *state) {
     return state->ready && WaitForSingleObject(state->ready, 0) == WAIT_OBJECT_0;
+}
+
+static void jj_input_route_keyboard(JJInputState *state, bool phone) {
+    /* HOGP transports physical keys, not Windows IME composition results.
+       Detach only this receiver window's IME while controlling the phone;
+       preserve the exact context and restore it on every exit path. */
+    if (phone && !state->ime_detached) {
+        state->desktop_ime = ImmAssociateContext(state->window, NULL);
+        state->ime_detached = true;
+    } else if (!phone && state->ime_detached) {
+        HIMC previous = state->desktop_ime;
+        state->desktop_ime = NULL;
+        state->ime_detached = false;
+        ImmAssociateContext(state->window, previous);
+    }
 }
 
 static void jj_input_release(JJInputState *state) {
@@ -70,6 +89,7 @@ static void jj_input_release(JJInputState *state) {
     state->pending_modifiers = 0;
     memset(state->down, 0, sizeof(state->down));
     memset(state->blocked_keys, 0, sizeof(state->blocked_keys));
+    jj_input_route_keyboard(state, false);
     if (was_captured) {
         puts("JJ_AIRPLAY_INPUT release");
         puts("JJ_AIRPLAY_CONTROL capture 0");
@@ -283,6 +303,7 @@ static bool jj_input_begin(JJInputState *state) {
         unsigned usage = jj_input_usage(key, 0);
         if (usage && (GetAsyncKeyState(key) & 0x8000)) state->blocked_keys[usage] = true;
     }
+    jj_input_route_keyboard(state, true);
     state->captured = true;
     SetCursor(NULL);
     puts("JJ_AIRPLAY_INPUT release");

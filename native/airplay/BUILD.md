@@ -36,6 +36,8 @@ GStreamer 内部窗口类使用 ANSI 窗口过程，中文标题相关消息改�
 
 ## 运行
 
+电脑控制期间，仅投屏画面窗口暂时解除 Windows 输入法上下文关联，让物理按键通过蓝牙交给 iPhone，避免拼音被电脑输入法截留。Esc、F8、Ctrl+Alt+M、失焦、断连及窗口销毁都会恢复原先的上下文；不更改 Windows 全局输入法或用户配置。中文在 iPhone 上选择拼音键盘后输入，Ctrl+空格切换手机输入法，空格选字。Windows 输入法已生成的中文字、电脑剪贴板与表情文本不会通过 HID 自动同步。
+
 媒体运行库从 leapbtw/uxplay-windows 的 2.0.0.1736 版本下载，
 SHA-256 固定为 9d3a51c15fc9db857351195e7eb7bbb21700d9ae25d936a54bcf8536b62cca18。
 只解压媒体 DLL 与 GStreamer 插件，不运行原包的桌面程序、Bonjour 服务或蓝牙程序。

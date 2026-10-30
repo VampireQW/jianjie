@@ -279,7 +279,7 @@ class MirrorSession(QObject):
                 self._control_captured = captured
                 if captured:
                     self._control_metrics_timer.start()
-                    self.controlChanged.emit("capturing", "正在操作 iPhone · Esc、Ctrl+Alt+M 或 F8 返回电脑。")
+                    self.controlChanged.emit("capturing", "正在操作 iPhone · Ctrl+空格切换手机输入法，Esc 返回电脑。")
                 else:
                     self._control_metrics_timer.stop()
                     if self.control:
@@ -787,7 +787,7 @@ class MirrorDialog(CardDialog):
         self.control_toggle.setCursor(Qt.PointingHandCursor)
         self.control_toggle.setStyleSheet("QCheckBox{color:#e5edf9;font-size:12px;spacing:7px;}"
                                          "QCheckBox:disabled{color:#7e8da3;}")
-        self.control_toggle.setToolTip("通过蓝牙操作 iPhone，需要开启辅助触控并完成配对。")
+        self.control_toggle.setToolTip("通过蓝牙使用鼠标和键盘操作 iPhone；中文输入请在手机上切换至拼音键盘。")
         self.control_toggle.toggled.connect(session.enable_control)
         self.control_toggle.toggled.connect(lambda checked: self.show_guide(1) if checked else None)
         control_row.addWidget(self.control_toggle)
@@ -828,7 +828,7 @@ class MirrorDialog(CardDialog):
         guide_tabs.setSpacing(8)
         self.guide_group = QButtonGroup(self)
         self.guide_group.setExclusive(True)
-        for index, caption in enumerate(("连接投屏", "连接电脑控制")):
+        for index, caption in enumerate(("连接投屏", "连接电脑控制", "键盘输入")):
             button = SurfaceButton(caption, variant="tab", pixels=12)
             button.setCheckable(True)
             self.guide_group.addButton(button, index)
@@ -853,6 +853,12 @@ class MirrorDialog(CardDialog):
         shortcut.setStyleSheet("color:#a9c8f2;font-size:11px;padding-top:4px;")
         control_guide.layout().addWidget(shortcut)
         self.guide_stack.addWidget(control_guide)
+        keyboard_guide = self._guide_page((
+            "点击投屏画面，按 F8 / Ctrl+Alt+M 进入控制，再点一下手机中的输入框。",
+            "按 Ctrl+空格切换手机输入法，选择中文拼音后，用电脑键盘输入拼音，按空格选取候选字。",
+            "支持字母、数字、退格、回车和方向键。按 Esc 返回电脑，电脑输入法会恢复。"),
+            "中文由 iPhone 的输入法处理。未添加中文时，请在 iPhone 的“设置 → 通用 → 键盘 → 键盘”中添加简体中文拼音；电脑输入法的候选字不会同步到手机。")
+        self.guide_stack.addWidget(keyboard_guide)
         self.guide_group.idClicked.connect(self.show_guide)
         self.show_guide(0)
         self.content_lay.addWidget(self.guide_stack)

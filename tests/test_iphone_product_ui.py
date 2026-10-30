@@ -69,6 +69,12 @@ class ProductTests(unittest.TestCase):
             copy=' '.join(label.text() for label in dialog.guide_stack.findChildren(QLabel))
             for value in ('辅助功能','触控','辅助触控','设备 → 蓝牙设备','F8','Ctrl+Alt+M','Esc','圆形指针'):
                 self.assertIn(value,copy)
+            self.assertIsNotNone(dialog.guide_group.button(2))
+            self.assertEqual(dialog.guide_group.button(2).text(),'键盘输入')
+            dialog.show_guide(2)
+            keyboard_copy=' '.join(label.text() for label in dialog.guide_stack.currentWidget().findChildren(QLabel))
+            for value in ('Ctrl+空格','拼音','空格','中文','电脑输入法'):
+                self.assertIn(value,keyboard_copy)
             self.assertIsNone(dialog.body.graphicsEffect())
             self.assertIsNotNone(dialog._crisp_shadow.graphicsEffect())
             dialog.close()
@@ -93,7 +99,7 @@ class ProductTests(unittest.TestCase):
             dialog.show_guide(1);dialog.show();APP.processEvents()
             self.assertLessEqual(dialog.height(),456)
             self.assertLessEqual(dialog.width(),616)
-            self.assertEqual(dialog.guide_stack.count(),2)
+            self.assertEqual(dialog.guide_stack.count(),3)
             dialog.close()
 
 
