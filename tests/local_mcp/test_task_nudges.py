@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QTime, Qt
@@ -169,6 +169,18 @@ class NudgeGuiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(self.nudges.card.isVisible())
         self.assertFalse(self.nudges.timer.isActive())
+
+    def test_tab_review_can_share_deferred_window_save(self):
+        before = copy.deepcopy(self.common.saved)
+        schedule = Mock()
+        self.manager.widget = SimpleNamespace(schedule_save=schedule, win_state=lambda: {})
+        self.now += 30
+        self.nudges.reviewed(defer_save=True)
+        schedule.assert_called_once()
+        self.assertEqual(self.common.saved, before)
+        self.assertEqual(self.manager.win['today_nudge'], self.nudges.policy.state)
+        self.manager.save()
+        self.assertEqual(self.common.saved['win']['today_nudge'], self.nudges.policy.state)
 
     def test_capture_lock_and_regular_toast_defer_without_consuming_budget(self):
         for key, value in (("shot_overlays", [object()]), ("rec_bar", SimpleNamespace(isVisible=lambda: True)),

@@ -16,12 +16,13 @@ import zipfile
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QMenu, QProgressBar, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
+                               QMenu, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
 import common as C
 from widgets import CardDialog, _WinHttpConnection
 from polished_controls import CrispLineEdit, SurfaceButton, SurfaceCheckBox, crisp_window_shadow
 from runtime_diagnostics import component_failure, record_failure
+from mirror_audio import audio_sink, enumerate_outputs, output_id, resolve_output
 
 
 class _PreparationFailure:
@@ -176,6 +177,7 @@ class MirrorSession(QObject):
         self.security_blocked = False
         self.discovery = {}
         self.video = {}
+        self.audio_output_info = {}
         self.control = None
         self._control_event = None
         self._control_captured = False
@@ -300,6 +302,7 @@ class MirrorSession(QObject):
                                           "detail": text,
                                           "discovery": self.discovery,
                                           "video": self.video,
+                                          "audio": self.audio_output_info,
                                           "control": {"state": self.control.state if self.control else "idle",
                                                       "mouseSubscribed": bool(self.control and self.control.mouse_subscribed),
                                                       "keyboardSubscribed": bool(self.control and self.control.keyboard_subscribed),
@@ -314,7 +317,7 @@ class MirrorSession(QObject):
         if not self._closing:
             self.changed.emit(state, text)
 
-    def start(self, name, audio=True, archive="", quality="1080p", fps=60, low_latency=True):
+    def start(self, name, audio=True, archive="", quality="1080p", fps=60, low_latency=True, audio_output=""):
         if self.process is not None or self._preparing:
             return
         name = name.strip()
@@ -330,7 +333,9 @@ class MirrorSession(QObject):
         self.security_blocked = False
         self._options = {"name": name, "audio": bool(audio),
                          "quality": quality if quality in ("720p", "1080p") else "1080p",
-                         "fps": fps if fps in (30, 60) else 60, "low_latency": bool(low_latency)}
+                         "fps": fps if fps in (30, 60) else 60, "low_latency": bool(low_latency),
+                         "audio_output": output_id(audio_output)}
+        self.audio_output_info = {}
         self.discovery = {}
         self.video = {}
         self.pin = str(secrets.randbelow(9000) + 1000)
@@ -386,6 +391,16 @@ class MirrorSession(QObject):
                     finally:
                         connection.close()
                     result = install_runtime(temporary, self._cancel, self.progress.emit)
+                requested = self._options["audio_output"]
+                device, missing = "", False
+                if audio and requested and not self._cancel.is_set():
+                    try:
+                        device, missing = resolve_output(requested, enumerate_outputs())
+                    except OSError as error:
+                        record_failure("audio_devices", error)
+                        missing = True
+                self.audio_output_info = {"enabled": bool(audio), "requested": requested,
+                                          "device": device, "fallback": missing}
             except InterruptedError:
                 result = None
             except Exception as error:
@@ -454,8 +469,7 @@ class MirrorSession(QObject):
                    "-fps", str(self._options["fps"])]
         if self._options["low_latency"]:
             command += ["-vsync", "no"]
-        if not self._options["audio"]:
-            command += ["-as", "0"]
+        command += ["-as", audio_sink(self._options["audio"], self.audio_output_info.get("device", ""))]
         try:
             self.process = subprocess.Popen(command, cwd=root, env=environment,
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -669,7 +683,26 @@ class MirrorSession(QObject):
         self._state("idle", "接收已关闭。重新打开投屏窗口后，可从 iPhone 发起连接。")
 
 
+class _AudioOutputButton(SurfaceButton):
+    """Keep long driver/device names inside the existing compact control surface."""
+    def __init__(self):
+        super().__init__("跟随系统默认", dropdown=True)
+        self._caption = "跟随系统默认"
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+
+    def set_caption(self, caption):
+        self._caption = caption
+        self.setText(self.fontMetrics().elidedText(caption, Qt.ElideRight, max(60, self.width() - 40)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.set_caption(self._caption)
+
+
 class MirrorDialog(CardDialog):
+    audioDevicesReady = Signal(object, str)
+
     def __init__(self, session, settings, parent=None):
         super().__init__("投", "iPhone 投屏", "AirPlay · 同一局域网", on_top=False, parent=parent)
         crisp_window_shadow(self, self.body)
@@ -679,6 +712,14 @@ class MirrorDialog(CardDialog):
         self._receive_after_stop = session.state == "stopping"
         self._pending_archive = ""
         self._choosing_package = False
+        self._audio_output_id = output_id(settings.get("mirror_audio_output", ""))
+        self._audio_output_name = str(settings.get("mirror_audio_output_name", "播放设备"))
+        self._audio_outputs = []
+        self._audio_scanning = False
+        self._audio_scanned = False
+        self._audio_scan_error = ""
+        self._audio_menu = None
+        self.audioDevicesReady.connect(self._audio_devices_ready)
         self._preferences_pending = False
         self._preferences_timer = QTimer(self)
         self._preferences_timer.setSingleShot(True)
@@ -782,6 +823,17 @@ class MirrorDialog(CardDialog):
         profile.addWidget(self.fps_button)
         preferences.addLayout(profile)
         hero_lay.addLayout(preferences)
+        output_row = QHBoxLayout()
+        output_row.setSpacing(12)
+        output_label = QLabel("声音输出")
+        output_label.setStyleSheet("font-size:11px;color:#a9bbd2;")
+        output_row.addWidget(output_label)
+        self.audio_output = _AudioOutputButton()
+        self.audio_output.setObjectName("mirrorAudioOutput")
+        self.audio_output.setAccessibleName("电脑声音输出设备")
+        self.audio_output.clicked.connect(self.choose_audio_output)
+        output_row.addWidget(self.audio_output, 1)
+        hero_lay.addLayout(output_row)
         control_row = QHBoxLayout()
         self.control_toggle = SurfaceCheckBox("电脑控制")
         self.control_toggle.setCursor(Qt.PointingHandCursor)
@@ -913,6 +965,7 @@ class MirrorDialog(CardDialog):
         session.progress.connect(self.update_progress)
         self.refresh(session.state, session.detail)
         self._fit_to_screen()
+        QTimer.singleShot(0, self.load_audio_outputs)
 
     def _guide_page(self, instructions, note=""):
         page = QWidget()
@@ -1025,6 +1078,8 @@ class MirrorDialog(CardDialog):
         busy = state in ("preparing", "starting", "connected", "streaming", "stopping")
         self.name.setReadOnly(busy)
         self.audio.setEnabled(not busy)
+        self.audio_output.setEnabled(not busy and self.audio.isChecked())
+        self._update_audio_caption()
         self.low_latency.setEnabled(not busy)
         self.quality_button.setEnabled(not busy)
         self.fps_button.setEnabled(not busy)
@@ -1062,17 +1117,21 @@ class MirrorDialog(CardDialog):
         self.settings["mirror_quality"] = self._quality
         self.settings["mirror_fps"] = self._fps
         self.settings["mirror_low_latency"] = self.low_latency.isChecked()
+        self.settings["mirror_audio_output"] = self._audio_output_id
+        self.settings["mirror_audio_output_name"] = self._audio_output_name if self._audio_output_id else ""
         C.save_settings(self.settings)
         self.bar.setValue(0)
         self.session.start(self.name.text(), self.audio.isChecked(), archive,
-                           self._quality, self._fps, self.low_latency.isChecked())
+                           self._quality, self._fps, self.low_latency.isChecked(), self._audio_output_id)
 
     def preferences_changed(self):
         if self._closing_window:
             return
         values = {"name": self.name.text().strip(), "audio": self.audio.isChecked(),
                   "quality": self._quality, "fps": self._fps,
-                  "low_latency": self.low_latency.isChecked()}
+                  "low_latency": self.low_latency.isChecked(), "audio_output": self._audio_output_id}
+        self.audio_output.setEnabled(self.audio.isChecked() and self.session.state not in
+                                     ("preparing", "starting", "connected", "streaming", "stopping"))
         if values == self.session._options:
             self._preferences_pending = False
             self._preferences_timer.stop()
@@ -1094,6 +1153,110 @@ class MirrorDialog(CardDialog):
             self.session.stop()
         else:
             self.begin()
+
+    def load_audio_outputs(self):
+        if self._closing_window or self._audio_scanning:
+            return
+        self._audio_scanning = True
+
+        def load():
+            devices, error = [], ""
+            try:
+                devices = enumerate_outputs()
+            except Exception as failure:
+                record_failure("audio_devices", failure)
+                error = "暂时无法读取播放设备，可先使用系统默认，或稍后刷新。"
+            if not self._closing_window:
+                try:
+                    self.audioDevicesReady.emit(devices, error)
+                except RuntimeError:
+                    pass  # The dialog can be deleted between the guard and queued delivery.
+
+        threading.Thread(target=load, name="JianJieAudioDevices", daemon=True).start()
+
+    def _audio_devices_ready(self, devices, error):
+        if self._closing_window:
+            return
+        self._audio_scanning = False
+        self._audio_scanned = True
+        self._audio_outputs = devices
+        self._audio_scan_error = error
+        self._update_audio_caption()
+        if self._audio_menu is not None and self._audio_menu.isVisible():
+            self._fill_audio_menu()
+
+    def _update_audio_caption(self):
+        chosen = next((device for device in self._audio_outputs
+                       if device.id.casefold() == self._audio_output_id.casefold()), None)
+        caption = chosen.name if chosen else self._audio_output_name if self._audio_output_id else "跟随系统默认"
+        if chosen:
+            self._audio_output_name = chosen.name
+        elif not self._audio_output_id:
+            default = next((device.name for device in self._audio_outputs if device.is_default), "")
+            if default:
+                caption += " · " + default
+        missing = bool(self._audio_output_id and self._audio_scanned and not chosen and not self._audio_scan_error)
+        fallback = (self.session.audio_output_info.get("fallback")
+                    and self.session.audio_output_info.get("requested") == self._audio_output_id)
+        if missing or fallback:
+            caption += "（未连接，使用系统默认）"
+        self.audio_output.set_caption(caption)
+        self.audio_output.setToolTip(caption + "\n勾选“播放手机声音”后，声音从此电脑设备播放。断开投屏后可切换，下次连接生效。")
+
+    def _fill_audio_menu(self):
+        menu = self._audio_menu
+        menu.clear()
+        width = min(480, max(280, self.audio_output.width()))
+
+        def add(caption, identity, name, checked):
+            text = menu.fontMetrics().elidedText(caption, Qt.ElideRight, width - 48)
+            action = menu.addAction(text.replace("&", "&&"))
+            action.setToolTip(caption)
+            action.setCheckable(True)
+            action.setChecked(checked)
+            action.setData((identity, name))
+
+        add("跟随系统默认", "", "", not self._audio_output_id)
+        if self._audio_outputs:
+            menu.addSeparator()
+        for device in self._audio_outputs:
+            add(device.name + (" · 系统默认" if device.is_default else ""), device.id, device.name,
+                device.id.casefold() == self._audio_output_id.casefold())
+        menu.addSeparator()
+        if self._audio_scan_error or (not self._audio_scanning and not self._audio_outputs):
+            menu.addAction("暂时无法读取播放设备" if self._audio_scan_error else "未发现可用播放设备").setEnabled(False)
+        if self._audio_output_id and self._audio_scanned and not any(
+                device.id.casefold() == self._audio_output_id.casefold() for device in self._audio_outputs):
+            menu.addAction("上次设备未连接，将使用系统默认").setEnabled(False)
+        refresh = menu.addAction("正在查找播放设备…" if self._audio_scanning else "刷新设备列表")
+        refresh.setEnabled(not self._audio_scanning)
+        refresh.setData("refresh")
+        menu.setMinimumWidth(width)
+
+    def choose_audio_output(self):
+        if not self.audio_output.isEnabled():
+            return
+        self.load_audio_outputs()
+        if self._audio_menu is None:
+            self._audio_menu = QMenu(self)
+            self._audio_menu.setStyleSheet(C.UI_MENU_QSS)
+            self._audio_menu.triggered.connect(self._audio_action)
+        self._fill_audio_menu()
+        self._audio_menu.popup(self.audio_output.mapToGlobal(self.audio_output.rect().bottomLeft()))
+
+    def _audio_action(self, action):
+        value = action.data()
+        if value == "refresh":
+            QTimer.singleShot(0, self.choose_audio_output)
+        elif isinstance(value, (tuple, list)) and len(value) == 2:
+            self._select_audio_output(*value)
+
+    def _select_audio_output(self, identity, name):
+        if not self.audio_output.isEnabled():
+            return
+        self._audio_output_id, self._audio_output_name = output_id(identity), name
+        self._update_audio_caption()
+        self.preferences_changed()
 
     def choose_profile(self, kind):
         button = self.quality_button if kind == "quality" else self.fps_button

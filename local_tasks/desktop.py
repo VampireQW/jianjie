@@ -1,7 +1,8 @@
 """正式版简截的任务页与可开关的本地 MCP。"""
 import time
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QPushButton, QWidget
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QMenu, QPushButton,
+                               QStackedWidget, QVBoxLayout, QWidget)
 from .core import today
 from .state import TaskStateMixin
 
@@ -75,6 +76,9 @@ def install():
                 self._after_change()
 
     class LocalTaskWidget(sticky.TaskWidget):
+        # Only one inactive view can be retained. Large views are rebuilt on demand.
+        INACTIVE_ROW_LIMIT = 128
+
         def __init__(self, manager):
             super().__init__(manager)
             self.setMinimumWidth(340)
@@ -111,7 +115,20 @@ def install():
                                     "QPushButton:checked {background:rgba(59,130,246,50);color:#fff;"
                                     "border-color:rgba(96,165,250,120);}"
                                     "QPushButton:hover {border-color:#60a5fa;}")
-            self.rebuild()
+            active = self.manager.win.get('task_tab', 'today')
+            if active not in self.tab_buttons:
+                active = 'today'
+                self.manager.win['task_tab'] = active
+            self._active_tab = active
+            self._page_day = today()
+            self._page_stack = QStackedWidget(self.body)
+            self._page_stack.setObjectName('taskPages')
+            self._page_stack.setStyleSheet('QStackedWidget#taskPages{background:transparent;border:none;}')
+            self.body.layout().replaceWidget(self.scroll, self._page_stack)
+            self._page_stack.addWidget(self.scroll)
+            self._tab_pages = {active: dict(scroll=self.scroll, host=self.list_host, layout=self.list_lay,
+                                            dirty=False, count=self.count_lbl.text(), rows=len(self.rows()))}
+            self._sync_tab_controls()
 
         def refresh_mcp_status(self):
             enabled = bool(getattr(self.manager, 'agent_enabled', lambda: False)())
@@ -149,30 +166,107 @@ def install():
             C.force_foreground(dialog)
 
         def select_tab(self, key):
+            if key not in self.tab_buttons:
+                return
             if self._editing is not None:
+                QApplication.inputMethod().commit()
                 self.inp.setFocus()
-                if self._editing is not None:
-                    return
+                self.finish_edit(commit=True)
+            if key == self._active_tab and self._page_day == today():
+                self._sync_tab_controls()
+                return
+            # Finish any checked-row transition against the old view, before changing scope.
+            if any(row._completing for row in self.rows()):
+                self.rebuild()
+                self.manager.save()
+            self.scroll._stop_wheel_animation()
+            if self._page_day != today():
+                self._page_day = today()
+                for page in self._tab_pages.values():
+                    page['dirty'] = True
             self.manager.win["task_tab"] = key
-            self.rebuild()
-            self.manager.save()
+            page = self._activate_page(key)
+            if page['dirty']:
+                self._render_page()
+            else:
+                self.count_lbl.setText(page['count'])
+            self._page_stack.setCurrentWidget(self.scroll)
+            self._sync_tab_controls()
+            self._trim_page_cache()
+            self.schedule_save()
             nudges = getattr(self.manager, "today_nudges", None)
             if key == "today" and nudges is not None and self.isActiveWindow():
-                nudges.reviewed()
+                nudges.reviewed(defer_save=True)
+
+        def _activate_page(self, key):
+            page = self._tab_pages.get(key)
+            if page is None:
+                scroll = sticky._SmoothTaskScrollArea(self._page_stack)
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QFrame.NoFrame)
+                scroll.viewport().setAutoFillBackground(False)
+                host = QWidget()
+                host.setObjectName('taskList')
+                host.setAutoFillBackground(False)
+                layout = QVBoxLayout(host)
+                layout.setContentsMargins(0, 2, 0, 0)
+                layout.setSpacing(1)
+                layout.addStretch(1)
+                scroll.setWidget(host)
+                self._page_stack.addWidget(scroll)
+                page = dict(scroll=scroll, host=host, layout=layout, dirty=True, count='', rows=0)
+                self._tab_pages[key] = page
+            self._active_tab = key
+            self.scroll, self.list_host, self.list_lay = page['scroll'], page['host'], page['layout']
+            return page
+
+        def _trim_page_cache(self, release_all=False):
+            for key, page in list(self._tab_pages.items()):
+                if key != self._active_tab and (release_all or page['rows'] > self.INACTIVE_ROW_LIMIT):
+                    page['scroll']._stop_wheel_animation()
+                    self._page_stack.removeWidget(page['scroll'])
+                    page['scroll'].hide()
+                    page['scroll'].deleteLater()
+                    del self._tab_pages[key]
+
+        def hideEvent(self, event):
+            super().hideEvent(event)
+            if hasattr(self, '_tab_pages'):
+                self._trim_page_cache(release_all=True)
 
         def rebuild(self):
+            if hasattr(self, '_tab_pages'):
+                for page in self._tab_pages.values():
+                    page['dirty'] = True
+                self._page_day = today()
+                key = self.manager.win.get('task_tab', 'today')
+                self._activate_page(key if key in self.tab_buttons else 'today')
+            self._render_page()
+            if hasattr(self, '_page_stack'):
+                self._page_stack.setCurrentWidget(self.scroll)
+                self._sync_tab_controls()
+                self._trim_page_cache()
+
+        def _render_page(self):
             super().rebuild()
-            if hasattr(self, "tab_buttons"):
-                active = self.manager.win.get("task_tab", "today")
-                for key, button in self.tab_buttons.items():
-                    button.setChecked(key == active)
-                self.inp.setPlaceholderText("添加今日任务" if active == "today" else "添加待办任务")
-                for row in self.rows():
-                    planned = row.task.get("plan_date")
-                    if planned and planned < today() and not row.done:
-                        row.setToolTip("此前未完成 · 计划 " + planned)
-                    elif planned and planned > today():
-                        row.setToolTip("计划 " + planned)
+            if self._editing is not None:
+                return
+            rows, day = self.rows(), today()
+            for row in rows:
+                planned = row.task.get('plan_date')
+                if planned and planned < day and not row.done:
+                    row.setToolTip('此前未完成 · 计划 ' + planned)
+                elif planned and planned > day:
+                    row.setToolTip('计划 ' + planned)
+                else:
+                    row.setToolTip('')
+            if hasattr(self, '_tab_pages'):
+                self._tab_pages[self._active_tab].update(dirty=False, count=self.count_lbl.text(), rows=len(rows))
+
+        def _sync_tab_controls(self):
+            for key, button in self.tab_buttons.items():
+                button.setChecked(key == self._active_tab)
+            self.inp.setPlaceholderText('添加今日任务' if self._active_tab == 'today' else '添加待办任务')
 
         def open_task_menu(self, task, anchor):
             super().open_task_menu(task, anchor)

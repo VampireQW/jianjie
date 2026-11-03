@@ -202,13 +202,17 @@ class TodayNudges(QObject):
     def tasks(self):
         return today_tasks(self.manager.tasks.values(), self.clock())
 
-    def persist(self):
+    def persist(self, defer_save=False):
         if self.manager.win.get("today_nudge") == self.policy.state:
             return True
         previous = copy.deepcopy(self.manager.win.get("today_nudge"))
         self.manager.win["today_nudge"] = copy.deepcopy(self.policy.state)
         try:
-            self.manager.save()
+            widget = self.manager.widget
+            if defer_save and widget is not None:
+                widget.schedule_save()
+            else:
+                self.manager.save()
             return True
         except OSError:
             if previous is None:
@@ -226,7 +230,7 @@ class TodayNudges(QObject):
         if not self.stopped and self.policy.config["enabled"] and not self.refresh_timer.isActive():
             self.refresh_timer.start(0)
 
-    def reconcile(self, startup=False):
+    def reconcile(self, startup=False, defer_save=False):
         if self.stopped:
             return
         if not self.policy.config["enabled"]:
@@ -235,7 +239,7 @@ class TodayNudges(QObject):
             return
         rows, now = self.tasks(), self.clock()
         deadline = self.policy.refresh(now, bool(rows), startup)
-        if not self.persist():
+        if not self.persist(defer_save=defer_save):
             self.interrupt()
             self.arm(now + 300)
             return
@@ -311,11 +315,11 @@ class TodayNudges(QObject):
             self.ctl.settings("today_reminders")
         self.reconcile()
 
-    def reviewed(self):
+    def reviewed(self, defer_save=False):
         if self.policy.config["enabled"] and self.tasks():
             self.interrupt()
             self.policy.review(self.clock())
-            self.reconcile()
+            self.reconcile(defer_save=defer_save)
 
     def exact_reminder(self):
         if self.policy.config["enabled"]:
