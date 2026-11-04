@@ -14,3 +14,10 @@
 - [SQLite 3.54.0 amalgamation](https://sqlite.org/2026/sqlite-amalgamation-3540000.zip)，SHA3-256 `7b670a62fdfbd672b75fef004cb703c8a3e87d3a5cc7d675b4a08337004a2d93`。
 
 `python native/build.py` 编译 DLL。正式 PyInstaller spec 会自动编译最新源文件，再把 DLL 放到 `native/jj_search.dll`；编译器、源码、缓存不随 EXE 分发，运行时不需要安装 C++ 编译环境。
+
+## 录屏加速
+
+`recording.cpp` / `python native/build_recording.py` 构建 `jj_recording.dll`，正式 spec 同样会从当前源码重建。
+使用 Windows 自带的 DXGI Desktop Duplication、D3D11 视频处理器与 Media Foundation：画面在 GPU 内裁剪、缩放、叠加指针并转换为 NV12，再交给系统 H.264 编码器；不逐帧读回整屏像素。
+输入选区按物理坐标处理，支持负坐标显示器。当前旋转显示器、不可用的桌面复制或不兼容驱动使用 Python 录屏线程中的兼容路径。录制中设备丢失会明确中止，避免继续生成停住的画面。
+依赖的 D3D、DXGI、MF、D3DCompiler_47 均为系统 DLL，不附加 OpenCV、FFmpeg 或其他媒体运行库。创建、提交与释放均在同一个录制线程；每个提交的 NV12 纹理由视频样本持有，避免异步编码时被下一帧覆盖。保留系统写入节流，避免无界视频缓冲。

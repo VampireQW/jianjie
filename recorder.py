@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""简截 JianJie for Windows — 录屏：mss 取帧 + Media Foundation H.264 编码，浮动控制条。
+"""简截 JianJie for Windows — GPU 录屏与系统 H.264 编码，浮动控制条。
 
 设计要点：
 - 窗口用 Qt.Window（与截图覆盖层一致），不用 Qt.Tool——后者在部分 Windows 环境
   下点击行为不可靠，且本条需要稳定接收鼠标/键盘事件。
-- R120 起编码器为系统 Media Foundation H.264（recorder_mf.MfH264Writer），直吃
-  mss 原生 BGRA 免色彩转换，全量版因此整体裁掉 OpenCV；选区缩放归一走 PIL 双线性。
+- R306：DXGI 桌面纹理直接经过 GPU 裁剪/缩放、指针叠加和 NV12 转换，
+  交给系统 Media Foundation H.264。旧驱动回退到区域抓帧及系统编码，不随包分发媒体运行库。
 - 任何失败都在条内红字显示原因，条上永远有 ✕ 关闭按钮 + Esc 可退出。
 """
 import ctypes
 import os
-import threading
 import time
 from ctypes import wintypes
 
@@ -455,6 +454,7 @@ class RecBar(QWidget):
         self._capturing = False
         self._cap_thread = None
         self.sct = None
+        self._engine = None
         self.mon = None
         self.writer = None
         self.started_at = 0
@@ -569,6 +569,8 @@ class RecBar(QWidget):
 
     def _elapsed(self):
         """录制有效时长：墙钟 - 暂停总时长（含进行中的暂停段）。标量读写，线程安全。"""
+        if self._engine:
+            return self._engine.elapsed()
         t = time.time() - self.started_at - self._paused_total
         if self._paused:
             t -= time.time() - self._paused_at
@@ -592,6 +594,8 @@ class RecBar(QWidget):
             self.bp.setToolTip("暂停录制（计时与写帧冻结，再点继续）")
             self.dot.set_active(True)
             self._sync_msg()
+        if self._engine:
+            self._engine.pause(self._paused)
 
     def _crop_xy(self, fw, fh):
         """把逻辑 region 换算到帧内物理像素范围（DPR 用 start() 时的缓存值）。"""
@@ -603,6 +607,50 @@ class RecBar(QWidget):
         x1 = min(fw, int((self.region.x() + self.region.width()) * d))
         y1 = min(fh, int((self.region.y() + self.region.height()) * d))
         return x0, y0, x1, y1
+
+    def _region_snapshot(self):
+        if not self.region:
+            return None
+        x0, y0, x1, y1 = self._crop_xy(self.mon['width'], self.mon['height'])
+        return x0, y0, x1 - x0, y1 - y0
+
+    @property
+    def frames(self):
+        engine = getattr(self, '_engine', None)
+        return engine.frames if engine else getattr(self, '_frames', 0)
+
+    @frames.setter
+    def frames(self, value):
+        self._frames = value
+
+    def _compatible_frame(self, frame, x, y):
+        poll_click()
+        self._stamp_cursor(frame[..., :3], x, y)
+
+    def _gpu_overlays(self):
+        """Only small pointer/ring sprites cross the CPU/GPU boundary, never the screen."""
+        now = time.perf_counter()
+        poll_click(now)
+        overlays = []
+        if self._cursor_on:
+            sprite = cursor_sprite()
+            if sprite:
+                pixels, hx, hy, x, y = sprite
+                overlays.append((pixels, x - hx, y - hy))
+        if self._clickfx_on:
+            for t0, px, py, button in list(_CLICKS):
+                age = now - t0
+                if not 0 <= age <= _CLICK_LIFE:
+                    continue
+                radius = 7.0 + age * 85.0
+                size = int(radius + 4)
+                yy, xx = np.mgrid[-size:size + 1, -size:size + 1]
+                ring = np.abs(np.sqrt(xx * xx + yy * yy) - radius) <= 1.6
+                pixels = np.zeros((size * 2 + 1, size * 2 + 1, 4), np.uint8)
+                pixels[ring, :3] = (60, 90, 255) if button == 2 else (0, 196, 255)
+                pixels[ring, 3] = int(255 * .8 * (1.0 - age / _CLICK_LIFE))
+                overlays.append((pixels, px - size, py - size))
+        return overlays
 
     def fail(self, msg):
         self.msg.setText(msg)
@@ -637,30 +685,21 @@ class RecBar(QWidget):
             dpr = scr.devicePixelRatio() or 1.0
             self._dpr = dpr                 # 抓帧线程只读缓存值，不碰 Qt 对象
             self._cursor_on = self.bc.isChecked()
-            self.sct = mss.mss()
             self.mon = {"top": g.y(), "left": g.x(),
                         "width": int(g.width() * dpr), "height": int(g.height() * dpr)}
-            shot = self.sct.grab(self.mon)
-            raw = np.frombuffer(shot.bgra, dtype=np.uint8).reshape(shot.height, shot.width, 4)
-            fh, fw = raw.shape[:2]              # R120：MF 直吃 BGRA，免 cv2.cvtColor
+            fw, fh = self.mon["width"], self.mon["height"]
             x0, y0, x1, y1 = self._crop_xy(fw, fh)
             cw, ch = max(16, (x1 - x0) & ~1), max(16, (y1 - y0) & ~1)   # H.264 宏块偶数约束
             base = C.clipboard_media_path("录屏", ".mp4")
             self.path = self._temporary_path = base
-            try:
-                self.writer = MfH264Writer(base, cw, ch, self.fps)
-            except Exception as e:
-                self.fail(f"无法创建 H.264 编码器：{e}")
-                self._cleanup()
-                return
+            from recorder_engine import RecordingWorker
+            self._engine = self.writer = RecordingWorker(
+                base, self.mon, self._region_snapshot(), cw, ch, self.fps,
+                process_frame=self._compatible_frame,
+                overlays=self._gpu_overlays)
             self.codec = "H.264"
             self._cw, self._ch = cw, ch
-            _first = raw[y0:y1, x0:x1].copy()   # frombuffer 只读：拷出可写帧，指针/高亮 stamp 才能原地写
-            if (_first.shape[1], _first.shape[0]) != (cw, ch):
-                _first = _resize_bgra(_first, cw, ch)   # 选区非偶/极小：归一到编码器尺寸
-            self._stamp_cursor(_first[..., :3], x0, y0)   # 3 通道视图贴指针（BGR 语义不变）
-            self.writer.write_bgra(_first)     # 首帧
-            self.frames = 1
+            self.frames = 0
             self.started_at = time.time()
             self._paused = False                 # 暂停态复位：重开录制不带上次暂停账
             self._paused_at = 0.0
@@ -683,66 +722,27 @@ class RecBar(QWidget):
                              + (" · 指针" if self.bc.isChecked() else ""))
             self.dot.set_active(True)
         except Exception as e:
-            self.fail(f"录屏启动失败：{e}")
+            self.fail("录屏启动失败，请检查显卡驱动后重试")
             self._cleanup()
 
     # ---------- 抓帧线程 ----------
     def _start_capture(self):
-        """抓帧+编码挪到独立线程：原先 GUI 线程 QTimer 会被取帧/编码拖慢，
-        实际只有 10~16fps；线程内按所选帧率节拍自转。"""
+        """The worker creates, uses and finalizes its own COM/GPU objects."""
+        self._engine.start()
         self._capturing = True
-        self._cap_thread = threading.Thread(target=self._cap_loop, daemon=True)
-        self._cap_thread.start()
+        self._cap_thread = self._engine.thread
 
     def _stop_capture(self):
         self._capturing = False
-        if self._cap_thread is not None:
-            self._cap_thread.join(timeout=3.0)
-            self._cap_thread = None
-
-    def _cap_loop(self):
-        period = 1.0 / self.fps
-        next_t = time.perf_counter()
-        try:
-            sct = mss.mss()                 # DC 归属本线程，避免跨线程 GDI 隐患
-        except Exception:
-            sct = self.sct                  # 兜底：沿用主线程实例
-        while self._capturing:
-            while self._paused and self._capturing:   # 暂停：挂起抓帧/写帧，节拍跟着走（恢复不爆发补帧）
-                next_t = time.perf_counter()
-                time.sleep(0.05)
-            if not self._capturing:
-                break
-            next_t += period
+        if self._engine:
             try:
-                poll_click()                          # 点击边沿检测：与本节拍同频
-                shot = sct.grab(self.mon)
-                raw = np.frombuffer(shot.bgra, dtype=np.uint8).reshape(shot.height, shot.width, 4)
-                x0, y0, x1, y1 = self._crop_xy(raw.shape[1], raw.shape[0])
-                frame = raw[y0:y1, x0:x1].copy()  # BGRA 直裁+可写拷贝：MF 编码器原生输入，免 cvtColor；
-                # frombuffer 只读，不拷则 stamp_cursor/stamp_click_fx 原地写静默失败（R121「录屏没指针」根因二）
-                self._stamp_cursor(frame[..., :3], x0, y0)   # 先贴指针再缩放：落点/大小随内容一致
-                if (frame.shape[1], frame.shape[0]) != (self._cw, self._ch):
-                    frame = _resize_bgra(frame, self._cw, self._ch)   # 缩放选区后归一到编码器尺寸
-                # 写入数对齐「有效录制时长×fps」（暂停段不计）：落后补帧、提前丢帧
-                dup = int(self._elapsed() * self.fps) - self.frames
-                if dup > 0:
-                    dup = min(dup, int(self.fps * 2)) # 卡顿兑底：最多补 2 秒
-                    for _ in range(dup):
-                        self.writer.write_bgra(frame)
-                    self.frames += dup
-            except Exception:
+                self._engine.close()
+            except RuntimeError:
+                # stop() reports the error; cleanup never closes a live worker's resources.
                 pass
-            delay = next_t - time.perf_counter()
-            if delay > 0:
-                time.sleep(delay)
-            else:
-                next_t = time.perf_counter()          # 已落后：重置节拍，不越积越多
-        try:
-            if sct is not self.sct:
-                sct.close()
-        except Exception:
-            pass
+            self.frames = self._engine.frames
+            if not self._engine.thread or not self._engine.thread.is_alive():
+                self._cap_thread = None
 
     # ---------- 录制中的选区实时框 ----------
     def _sync_live_frame(self):
@@ -772,6 +772,8 @@ class RecBar(QWidget):
 
     def _on_region_move(self, r):
         self.region = QRect(r)
+        if self._engine:
+            self._engine.region = self._region_snapshot()
         self.rlbl.setText(f"范围 {self.region.width()}×{self.region.height()}")
         if self._dim:
             self._dim.update()          # 压暗层按新选区重画（读 region 的 lambda 已就绪）
@@ -780,6 +782,15 @@ class RecBar(QWidget):
     def _tick(self):
         s = int(self._elapsed())
         self.time.setText(f"{s // 60:02d}:{s % 60:02d}")
+        if self._engine and self._engine.error:
+            self.fail(self._engine.error)
+            self._cleanup()
+        elif self._engine and not self._paused and self._engine.actual_fps:
+            actual = self._engine.actual_fps
+            if actual < self.fps * .85:
+                self.msg.setText(f"录制中 · 目标 {self.fps}fps · 实际 {actual:.0f}fps")
+            else:
+                self._sync_msg()
 
     def stop(self, copy=False):
         """对号只复制内部缓存的视频；下载才移动到指定保存目录。"""
@@ -797,6 +808,7 @@ class RecBar(QWidget):
                 self.adjustSize()
                 return
             self.writer = None
+        self._engine = None
         if self.sct:
             self.sct.close()
             self.sct = None
@@ -837,6 +849,9 @@ class RecBar(QWidget):
             except Exception:
                 pass
             self.writer = None
+        if self._engine and self._engine.thread and self._engine.thread.is_alive():
+            return  # Never delete the media file while its worker is finalizing it.
+        self._engine = None
         if self.sct:
             self.sct.close()
             self.sct = None

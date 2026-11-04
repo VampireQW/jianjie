@@ -150,6 +150,7 @@ class MfH264Writer:
         self.w, self.h, self.fps = w, h, int(fps)
         self.path = path
         self._n = 0                               # 已写帧数（时间戳=帧号×帧长，严格递增）
+        self._last_timestamp = -1
         self._dur = 10_000_000 // self.fps        # 100ns 单位
         self._closed = False
         # Sink Writer 在创建它的线程里用 COM：本线程初始化（Qt UI 线程已 STA，见 _co_init）
@@ -200,13 +201,16 @@ class MfH264Writer:
         _check(set_u32(mt, byref(_MF_MT_INTERLACE_MODE), _PROGRESSIVE), "SetUINT32(interlace)")
         return mt
 
-    def write_bgra(self, bgra):
+    def write_bgra(self, bgra, timestamp=None):
         """喂一帧 numpy BGRA(H,W,4)（mss 原生字节序）；尺寸必须等于构造尺寸（构造期已裁偶）。"""
         if self._closed:
             raise RuntimeError("编码器已关闭")
         if bgra.shape[0] != self.h or bgra.shape[1] != self.w:
             raise ValueError("帧尺寸 %dx%d 与编码器 %dx%d 不符"
                              % (bgra.shape[1], bgra.shape[0], self.w, self.h))
+        timestamp = self._n * 10_000_000 // self.fps if timestamp is None else int(timestamp)
+        if timestamp <= self._last_timestamp:
+            raise ValueError("帧时间必须递增")
         data = np.ascontiguousarray(bgra[::-1]).tobytes()     # bottom-up 翻转（见类文档串）
         mbuf = c_void_p()
         _check(_mfplat.MFCreateMemoryBuffer(c_uint32(len(data)), byref(mbuf)), "MFCreateMemoryBuffer")
@@ -222,11 +226,12 @@ class MfH264Writer:
             _check(_mfplat.MFCreateSample(byref(samp)), "MFCreateSample")
             try:
                 _check(_proto(samp, 42, HRESULT, (c_void_p,))(samp, mbuf), "Sample.AddBuffer")
-                _check(_proto(samp, 36, HRESULT, (c_int64,))(samp, self._n * self._dur), "SetSampleTime")
+                _check(_proto(samp, 36, HRESULT, (c_int64,))(samp, timestamp), "SetSampleTime")
                 _check(_proto(samp, 38, HRESULT, (c_int64,))(samp, self._dur), "SetSampleDuration")
                 _check(_proto(self._writer, 6, HRESULT, (c_uint32, c_void_p))(
                     self._writer, self._idx, samp), "WriteSample")
                 self._n += 1
+                self._last_timestamp = timestamp
             finally:
                 _release(samp)
         finally:

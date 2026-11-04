@@ -20,6 +20,7 @@ import icons
 from common import pictures_dir, timestamp
 from longshot_fill import ColumnFill, FillStyle, compose_columns
 from longshot_fill_ui import FillButton, FillColorPopup
+from longshot_link import WheelLink, physical_geometry
 
 
 _MIN_COLUMN_FRACTION = 0.1
@@ -322,6 +323,13 @@ class LongShotBar(QWidget):
         b3.setEnabled(False)
         self.bedit, self.b_cancel, self.b_fin, self.b_save = bedit, b2, b3, bsave
         self.bcols = bcols
+        self.blink = icons.tool_button("cols", "联动滚动：在任意一栏使用触摸板双指上下滑动或鼠标滚轮，另一栏跟随；关闭后可单独校正。\n适用于两个独立滚动区域；段落长度不同仍可能错位。Ctrl/Shift+滚动不联动。",
+                                        self.toggle_link, color="#7dd3fc", checkable=True, dpr=dpr, lucide="link-2")
+        self.blink.setObjectName("linkedScroll")
+        self.blink.setAccessibleName("联动滚动")
+        self.blink.hide()
+        self._scroll_link = WheelLink(self)
+        self._scroll_link.failed.connect(self._link_failed)
         self._padding = (ColumnFill(), ColumnFill())
         self._fill_popup = None
         self._fill_color_dialog = None
@@ -335,6 +343,7 @@ class LongShotBar(QWidget):
         lay.addWidget(self.stat)
         sep()
         lay.addWidget(bcols)                           # R119 单/双栏切换（checked=双栏态）
+        lay.addWidget(self.blink)
         lay.addWidget(self.bfill)
         lay.addWidget(bedit)
         lay.addWidget(bsave)                           # ⬇ 直接存本地目录
@@ -401,6 +410,9 @@ class LongShotBar(QWidget):
 
     def closeEvent(self, ev):
         self._fill_closing = True
+        self.timer.stop()
+        self.running = False
+        self._scroll_link.close()
         if self._fill_popup is not None:
             self._fill_popup.hide()
         if self._fill_color_dialog is not None:
@@ -411,6 +423,11 @@ class LongShotBar(QWidget):
             self._preview.close()
             self._preview = None
         super().closeEvent(ev)
+
+    def hideEvent(self, ev):
+        if hasattr(self, "_scroll_link"):
+            self._scroll_link.configure(None)
+        super().hideEvent(ev)
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key_Escape:
@@ -451,6 +468,9 @@ class LongShotBar(QWidget):
             cx, cy = g.center().x(), g.center().y()
         QCursor.setPos(cx, cy)             # 光标先落进区域：紧接着的滚轮才会滚到页面上
         self._dual = False                 # 每次进条默认单栏，双栏由切换钮即时开（R119）
+        self.blink.setChecked(False)
+        self.blink.hide()
+        self._scroll_link.configure(None)
         self._padding = (ColumnFill(), ColumnFill())
         self.bfill.hide()
         self.bcols.setChecked(False)
@@ -525,6 +545,7 @@ class LongShotBar(QWidget):
         if self.bcols.isChecked():
             self._dual = True
             self.bfill.show()
+            self.blink.show()
             for model in self._padding:
                 model.reset()
             dx = self._dx()
@@ -548,6 +569,9 @@ class LongShotBar(QWidget):
             self.msg.setText("双栏模式 · 左右栏各自向下慢滚，分栏线可拖")
         else:
             self._dual = False
+            self.blink.setChecked(False)
+            self.blink.hide()
+            self._scroll_link.configure(None)
             self.bfill.hide()
             if self._fill_popup is not None:
                 self._fill_popup.hide()
@@ -569,6 +593,36 @@ class LongShotBar(QWidget):
             self.msg.setText("单栏模式 · 请向下慢滚，简截自动拼接")
         self.update_stat()
         self.adjustSize()
+
+    def toggle_link(self):
+        if not self._dual:
+            self.blink.setChecked(False)
+        self.msg.setText("联动滚动 · 两栏同向滚动" if self.blink.isChecked()
+                         else "独立滚动 · 可分别校正位置")
+        self._sync_scroll_link()
+        self.adjustSize()
+
+    def _link_failed(self, message):
+        if not self.running or not self.blink.isChecked():
+            return
+        self.blink.setChecked(False)
+        self._scroll_link.configure(None)
+        self.msg.setText(message)
+        self.adjustSize()
+
+    def _sync_scroll_link(self):
+        active = (self.running and self._dual and self.blink.isChecked()
+                  and self.isVisible() and self.timer.isActive() and not self._fill_picking
+                  and not self._fill_closing
+                  and not (self._fill_popup is not None and self._fill_popup.isVisible()))
+        if not active:
+            self._scroll_link.configure(None)
+            return
+        try:
+            geometry = physical_geometry(self._screen or self.screen(), self.region, self._div)
+            self._scroll_link.configure(geometry)
+        except (OSError, ValueError) as error:
+            self._link_failed(str(error))
 
     def _grab_dual(self, frame):
         """双栏态抓帧：左右栏各喂半帧——哪半变了哪半推进，静止半栏 prev 未变早退，不猜光标。"""
@@ -625,6 +679,7 @@ class LongShotBar(QWidget):
             return
         self._fill_timer_was_active = self.timer.isActive()
         self.timer.stop()
+        self._sync_scroll_link()
         self._right_cancel.set_suspended(True)
         if self._fill_popup is None:
             self._fill_popup = FillColorPopup(self)
@@ -637,6 +692,7 @@ class LongShotBar(QWidget):
         self._right_cancel.set_suspended(False)
         if self._fill_timer_was_active and self.running and self.isVisible():
             self.timer.start()
+        self._sync_scroll_link()
         self._fill_timer_was_active = False
 
     def set_fill_color(self, index, color):
@@ -654,6 +710,7 @@ class LongShotBar(QWidget):
         if not self._dual or self._colL is None:
             return
         self._fill_picking = True
+        self._sync_scroll_link()
         self._fill_timer_was_active |= self.timer.isActive()
         self.timer.stop()
         self._right_cancel.set_suspended(True)
@@ -724,6 +781,7 @@ class LongShotBar(QWidget):
         self._miss = 0
         self.update_stat()
         self.msg.setText("分栏位置已调整 · 左右栏各自向下慢滚")
+        self._sync_scroll_link()
         return True
 
     def _close_divider(self):
@@ -767,6 +825,7 @@ class LongShotBar(QWidget):
             return
         self.timer.stop()
         self.running = False
+        self._sync_scroll_link()
         self.dot.set_active(False)
         self._restore_cursor()
         h, w = self.long_arr.shape[:2]
@@ -796,6 +855,7 @@ class LongShotBar(QWidget):
             return
         self.timer.stop()
         self.running = False
+        self._sync_scroll_link()
         self._restore_cursor()
         self.close()
         image = self.long_arr
@@ -807,6 +867,7 @@ class LongShotBar(QWidget):
     def cancel(self):
         self.timer.stop()
         self.running = False
+        self._sync_scroll_link()
         self._restore_cursor()
         self.close()
         self._release_images()

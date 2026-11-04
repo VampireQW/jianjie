@@ -17,6 +17,8 @@ if not LITE:
     # Build from the current C++ source before packaging; never silently ship an old DLL.
     _native_build = runpy.run_path(os.path.join(SPECPATH, "native", "build.py"))
     _native_binaries = [(_native_build["build"](), "native")]
+    _recording_build = runpy.run_path(os.path.join(SPECPATH, "native", "build_recording.py"))
+    _native_binaries.append((_recording_build["build"](), "native"))
     _airplay_package = runpy.run_path(os.path.join(SPECPATH, "native", "airplay", "package.py"))
     _airplay_prebuilt = os.environ.get("JJ_AIRPLAY_PREBUILT_RECEIVER")
     _airplay_datas = _airplay_package["package_data"](SPECPATH, _airplay_prebuilt)

@@ -3829,16 +3829,17 @@ def smoke():
     # 10g R110 多屏坐标：合成取帧替身驱动生产 start/grab/抓帧循环，两版均跑，失败不 SKIP。
     def _coordinates110():
         import recorder as rc110
+        import recorder_engine as re110
         import gifrec as gf110
         import numpy as np110
         from types import SimpleNamespace as NS110
         saved = {k: getattr(rc110, k) for k in ("mss", "MfH264Writer", "missing_deps", "poll_click")}
         saved_gif = {k: getattr(gf110, k) for k in ("grab_array", "stamp_cursor", "stamp_click_fx", "poll_click")}
+        saved_gpu = re110.GpuRecorder
         bar = gif = None
         try:
             bar = RecBar(on_done=lambda *a: None, on_error=lambda m: errors.append(m))
             bar._open_live = lambda: None
-            bar._start_capture = lambda: None
             bar._elapsed = lambda: 0.1
             bar.bc.setChecked(False)
             bar.bh.setChecked(False)
@@ -3856,20 +3857,28 @@ def smoke():
                 raw[:, :, 2:] = 255
                 return NS110(bgra=raw.tobytes(), height=h, width=w)
 
-            rc110.mss = NS110(mss=lambda: NS110(grab=grab, close=lambda: None))
-            # R120：编码器换 MF——替身拦截 write_bgra（帧为 BGRA 4 通道，可能经偶数化/resize 归一）
-            rc110.MfH264Writer = lambda *a: NS110(
-                close=lambda: None, frames=0,
-                write_bgra=lambda a: written.append(a.copy()))
+            class _PatternGpu110:
+                def __init__(self, path, monitor, w, h, fps):
+                    self.w, self.h = w, h
+                def write_frame(self, box, timestamp, overlays):
+                    source = grab(box)
+                    frame = np110.frombuffer(source.bgra, np110.uint8).reshape(source.height, source.width, 4)
+                    if (frame.shape[1], frame.shape[0]) != (self.w, self.h):
+                        frame = rc110._resize_bgra(frame, self.w, self.h)
+                    written.append(frame.copy())
+                def close(self): pass
+            re110.GpuRecorder = _PatternGpu110
             rc110.missing_deps = lambda: []
-            rc110.poll_click = gf110.poll_click = lambda: None
+            rc110.poll_click = gf110.poll_click = lambda *args: None
             gf110.stamp_cursor = lambda a, x, y, **kw: effect_calls.append((x, y, kw))
             gf110.stamp_click_fx = lambda a, x, y, **kw: effect_calls.append((x, y, kw))
             cases = 0
             for sx, sy in ((0, 0), (-2560, 0), (3120, 0), (0, -1440),
                            (0, 2080), (-2560, -1440), (3120, 2080)):
                 for d in (1.25, 1.5, 2.0):
-                    screen = NS110(geometry=lambda: QRect(sx, sy, 160, 120), devicePixelRatio=lambda: d)
+                    screen = NS110(geometry=lambda: QRect(sx, sy, 160, 120),
+                                   availableGeometry=lambda: QRect(sx, sy, 160, 120),
+                                   devicePixelRatio=lambda: d)
                     bar.screen = lambda: screen
                     for region in (None, QRect(16, 24, 64, 48), QRect(81, 63, 63, 41)):
                         bar.region, bar.region_screen = region, screen
@@ -3890,14 +3899,16 @@ def smoke():
                             expected = rc110._resize_bgra(expected, _cw110, _ch110)
                         bar.start()
                         assert not errors and bar.writer, errors
+                        assert bar._engine.capture_backend == 'GPU'
                         assert bar.mon == expected_mon and bar._dpr == d
-                        assert len(written) == 1 and np110.array_equal(written[0], expected)
+                        assert written and np110.array_equal(written[0], expected)
                         assert not bar.br.isEnabled()
                         bar.pick_region()                 # 方法级守卫，不仅仅按钮禁用
                         assert bar.isVisible() and not getattr(bar, "_pick_ov", None)
-                        single_step = True
-                        bar._capturing = True
-                        bar._cap_loop()                   # 后续帧必须使用与首帧相同的区域
+                        _deadline110 = time.perf_counter() + .5
+                        while len(written) < 2 and time.perf_counter() < _deadline110:
+                            time.sleep(.002)
+                        bar._stop_capture()               # 后续帧必须使用与首帧相同的区域
                         assert len(written) > 1 and all(np110.array_equal(f, expected) for f in written)
                         bar._cleanup()
                         gif._size = None
@@ -3924,6 +3935,7 @@ def smoke():
                 setattr(rc110, k, v)
             for k, v in saved_gif.items():
                 setattr(gf110, k, v)
+            re110.GpuRecorder = saved_gpu
     try:
         check("R110 多屏区域一致（63组正负原点/125·150·200%/首帧·续帧/GIF效果/重选守卫）", _coordinates110())
     except Exception as e:
