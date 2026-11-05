@@ -7,7 +7,8 @@ R107：模板匹配由 cv2 换成纯 numpy 实现——轻量包（截图+长截
 
 R117/R119：双栏长截图——选区分左右两栏各跑一套独立拼接状态机（左栏滚时只有左半帧变，
 滚动归属天然按帧内容区分，不猜光标）；合成时两栏顶对齐，短栏底部自动延续背景，可手动取色。
-R119 收编进长截图本体：拼接条上切换钮即时切单/双栏（保留已拼内容），独立入口全撤。"""
+R119 收编进长截图本体：拼接条上切换钮即时切单/双栏（保留已拼内容），独立入口全撤。
+R307：可选横向单区域拼接，连续视图的完整重叠验证防重复网格误匹配。"""
 import numpy as np
 from PySide6.QtCore import QEvent, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import (QColor, QCursor, QGuiApplication, QIcon, QImage, QPainter,
@@ -221,6 +222,37 @@ class RegionHalo(QWidget):
         p.end()
 
 
+def horizontal_preview_geometry(selection, bounds, toolbar=None):
+    """Prefer above the selection; reserve the toolbar and screen work area."""
+    area = bounds.adjusted(6,6,-6,-6)
+    if not area.isValid():
+        return QRect()
+    width = max(1,min(max(320,round(selection.width()*.92)),round(bounds.width()*.8),area.width()))
+    height = min(140,max(60,bounds.height()//4),area.height())
+    x = max(area.left(),min(selection.center().x()-width//2,area.right()-width+1))
+    bands = [(area.top(),area.bottom()+1)]
+    if toolbar is not None and toolbar.isValid():
+        blocked = toolbar.adjusted(-10,-10,10,10).intersected(area)
+        if not blocked.isEmpty() and blocked.left()<x+width and blocked.right()>=x:
+            bands = [(area.top(),blocked.top()),(blocked.bottom()+1,area.bottom()+1)]
+    bands = [(top,bottom) for top,bottom in bands if bottom>top]
+    if not bands:
+        return QRect()
+    minimum_height = min(60,max(bottom-top for top,bottom in bands))
+    candidates = []
+    for top,bottom in bands:
+        if bottom-top<minimum_height:
+            continue
+        h = min(height,bottom-top)
+        preferred = selection.top()-h-12
+        y = max(top,min(preferred,bottom-h))
+        rect = QRect(x,y,width,h)
+        above = rect.bottom()<selection.top()-8
+        outside = above or rect.top()>selection.bottom()+8
+        candidates.append(((not above,h<height,not outside,abs(y-preferred)),rect))
+    return min(candidates,key=lambda item:item[0])[1]
+
+
 class LongPreview(QWidget):
     """长截图右侧实时预览（微信式）：整图缩略悬浮窗，拼接出新一屏就整图刷新。
 
@@ -231,13 +263,17 @@ class LongPreview(QWidget):
     def __init__(self, screen, region):
         super().__init__(None)
         self._scr = QRect(screen.geometry())
+        self._work_area = QRect(screen.availableGeometry())
+        if not self._work_area.isValid():
+            self._work_area = QRect(self._scr)
         sel = self._scr if region is None else QRect(region).normalized().translated(self._scr.topLeft())
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
                             | Qt.Tool | Qt.WindowTransparentForInput)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         ph = int(min(self._scr.height() * 0.82, max(300, sel.height() * 0.92)))
         self.resize(self.PW, ph)
+        self._selection = QRect(sel)
         self._pm = None
         x = sel.right() + 14
         if x + self.PW > self._scr.right() - 4:
@@ -248,10 +284,30 @@ class LongPreview(QWidget):
                 x = self._scr.right() - self.PW - 8   # 两侧都放不下：叠在选区右缘上（同微信浮在页面上）
         y = max(self._scr.top() + 8, min(sel.center().y() - ph // 2, self._scr.bottom() - ph - 8))
         self.move(x, y)
+        self._vertical_geometry = QRect(self.geometry())
         C.prepare_capture_window(self)
         self.show()
         self.raise_()
         C.exclude_from_capture(self)
+
+    def set_horizontal(self, enabled, toolbar=None):
+        if not enabled:
+            changed = self.geometry()!=self._vertical_geometry
+            self.setGeometry(self._vertical_geometry)
+            if not self.isVisible():
+                self.show()
+            return changed
+        # A wide strip keeps horizontal progress readable instead of shrinking
+        # a wide table into the top few pixels of the tall vertical preview.
+        rect = horizontal_preview_geometry(self._selection,self._work_area,toolbar)
+        if rect.isEmpty():
+            self.hide()
+            return False
+        changed = self.geometry()!=rect
+        self.setGeometry(rect)
+        if not self.isVisible():
+            self.show()
+        return changed
 
     def set_arr(self, arr):
         """拼接出一版新长图就整图缩略一帧（QImage 只借用缓冲，arr 由长图管线持有）。"""
@@ -323,6 +379,20 @@ class LongShotBar(QWidget):
         b3.setEnabled(False)
         self.bedit, self.b_cancel, self.b_fin, self.b_save = bedit, b2, b3, bsave
         self.bcols = bcols
+        self.baxis = QPushButton("纵向")
+        self.baxis.setObjectName("longshotAxis")
+        self.baxis.setAccessibleName("长截图拼接方向")
+        self.baxis.setCheckable(True)
+        self.baxis.setFixedSize(62, 30)
+        self.baxis.setCursor(Qt.PointingHandCursor)
+        self.baxis.setStyleSheet(
+            "QPushButton#longshotAxis{background:rgba(255,255,255,10);color:#dfe4ef;"
+            "border:1px solid transparent;border-radius:6px;font-size:12.5px;padding:0 8px;}"
+            "QPushButton#longshotAxis:hover{background:rgba(255,255,255,24);}"
+            "QPushButton#longshotAxis:checked{background:rgba(56,189,248,32);color:#7dd3fc;}"
+            "QPushButton#longshotAxis:focus{border-color:#60a5fa;}"
+            "QPushButton#longshotAxis:disabled{color:#8b93a7;}")
+        self.baxis.clicked.connect(self.set_horizontal)
         self.blink = icons.tool_button("cols", "联动滚动：在任意一栏使用触摸板双指上下滑动或鼠标滚轮，另一栏跟随；关闭后可单独校正。\n适用于两个独立滚动区域；段落长度不同仍可能错位。Ctrl/Shift+滚动不联动。",
                                         self.toggle_link, color="#7dd3fc", checkable=True, dpr=dpr, lucide="link-2")
         self.blink.setObjectName("linkedScroll")
@@ -342,6 +412,7 @@ class LongShotBar(QWidget):
         lay.addWidget(self.msg)
         lay.addWidget(self.stat)
         sep()
+        lay.addWidget(self.baxis)
         lay.addWidget(bcols)                           # R119 单/双栏切换（checked=双栏态）
         lay.addWidget(self.blink)
         lay.addWidget(self.bfill)
@@ -363,6 +434,8 @@ class LongShotBar(QWidget):
         self._footer_h = 0                 # 输出中保留的固定底部高度
         self._appended = False             # 是否已成功追加过内容（长图底部还是首帧原样）
         self._dual = False                 # R119 双栏模式：条上切换钮即时切，默认单栏
+        self._horizontal = False
+        self._horizontal_state = None
         self._div = 0.5                    # 分栏位置（逻辑宽占比），双栏未拼内容时可拖
         self._colL = None                  # 双栏态左/右栏状态机（_ColumnState）
         self._colR = None
@@ -394,10 +467,16 @@ class LongShotBar(QWidget):
         scr = self._screen or getattr(self, "_toolbar_screen", None)
         if scr is None:
             return
-        if C.place_toolbar_near_region(self, self.region, scr, gap=10, edge=6):
-            return
-        g = scr.geometry()                   # 整屏模式保留原来的屏顶居中位置
-        self.move(g.center().x() - self.width() // 2, g.top() + 16)
+        if not C.place_toolbar_near_region(self, self.region, scr, gap=10, edge=6):
+            g = scr.geometry()                   # 整屏模式保留原来的屏顶居中位置
+            self.move(g.center().x() - self.width() // 2, g.top() + 16)
+        self._place_horizontal_preview()
+
+    def _place_horizontal_preview(self):
+        preview = getattr(self,"_preview",None)
+        if preview is not None and getattr(self,"_horizontal",False):
+            if preview.set_horizontal(True,self.geometry()) and self.long_arr is not None:
+                preview.set_arr(self.long_arr)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -453,6 +532,14 @@ class LongShotBar(QWidget):
         self._foot_stripped = False        # 重新开始：剔除/追加状态一并复位
         self._footer_h = 0                 # 固定底部保留在输出中，匹配时单独跳过
         self._appended = False
+        self._horizontal = False
+        self._horizontal_state = None
+        self.baxis.setChecked(False)
+        self.baxis.setText("纵向")
+        self.baxis.setEnabled(True)
+        self.baxis.setToolTip("拼接方向：点击切换横向；开始拼接后锁定方向")
+        self.bcols.show()
+        self._preview.set_horizontal(False)
         self.running = True
         self.dot.set_active(True)
         self.b_save.setEnabled(True)       # 有图可存：⬇下载/✓对号解禁（进条即滚动态，构造即解禁）
@@ -493,8 +580,13 @@ class LongShotBar(QWidget):
             frame = None
         if frame is None:
             self._miss += 1                        # 抓帧瞬时失败按失联计，不中断
-            if self._miss >= self.MISS_LIMIT:
+            if self._horizontal:
+                self.msg.setText("暂时无法捕获页面，请继续慢滑或手动完成")
+            elif self._miss >= self.MISS_LIMIT:
                 self.finish()
+            return
+        if self._horizontal:
+            self._grab_horizontal(frame)
             return
         if self._dual:
             self._grab_dual(frame)                 # R119 双栏态走分栏拼接
@@ -529,6 +621,8 @@ class LongShotBar(QWidget):
             self._prev = frame.copy()
             self.msg.setText("重叠匹配暂失败，继续尝试…（底部动图/轮播不影响拼接）")
         self.update_stat()
+        if self._appended:
+            self._lock_direction()
         if self._should_autofinish():
             self.finish()                          # 仅连续失联才自动收尾；到底与否由用户判断
 
@@ -537,9 +631,63 @@ class LongShotBar(QWidget):
         return self._miss >= self.MISS_LIMIT
 
     # ---- R119 双栏模式（条上切换钮即时切，保留已拼内容）----
+    def _lock_direction(self):
+        self.baxis.setEnabled(False)
+        self.baxis.setToolTip("已开始拼接；重新框选后可更换方向")
+
+    def set_horizontal(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self._horizontal:
+            return True
+        appended = self._appended or (self._colL is not None and
+                                     (self._colL.appended or self._colR.appended))
+        if appended or not self.running:
+            self.baxis.setChecked(self._horizontal)
+            return False
+        if self._dual:
+            self.bcols.setChecked(False)
+            self.toggle_dual()
+        self._horizontal = enabled
+        self.baxis.setChecked(enabled)
+        self.baxis.setText("横向" if enabled else "纵向")
+        self.baxis.setToolTip("横向拼接：先到页面最左侧，再向右慢滑；支持触摸板双指或页面横向滚动条" if enabled
+                              else "纵向拼接：向下慢滚；点击切换横向")
+        self.bcols.setVisible(not enabled)
+        self._horizontal_state = _HorizontalState(self.long_arr.copy()) if enabled else None
+        self._preview.set_horizontal(enabled,self.geometry())
+        self._preview.set_arr(self.long_arr)
+        self.msg.setText("横向模式 · 请向右慢滑" if enabled else "请向下慢滚，简截自动拼接")
+        self.update_stat()
+        self.adjustSize()
+        self._place_horizontal_preview()
+        return True
+
+    def _grab_horizontal(self, frame):
+        added, score = self._horizontal_state.feed(frame)
+        if added > 0:
+            self.long_arr = self._horizontal_state.long
+            self.frames = self._horizontal_state.frames
+            self._appended = True
+            self._miss = 0
+            self._lock_direction()
+            self._preview.set_arr(self.long_arr)
+            self.msg.setText(f"横向拼接 · +{added} px")
+        elif added == 0:
+            self._miss = 0
+            self.msg.setText("横向模式 · 等待向右滚动…")
+        else:
+            self._miss = min(self.MISS_LIMIT, self._miss + 1)
+            self.msg.setText("横向重叠不明确，请保留列标题并慢滑")
+        self.update_stat()
+        # Uncertain alignment is not completion. Keep the partial image until
+        # an explicit copy/save/edit/cancel action, without changing the clipboard.
+
     def toggle_dual(self):
         """单/双栏切换：单→双按分栏线纵切长图与最近帧重建两套状态机（拼接进度语义继承）；
         双→单两栏顶对齐合成回整图，补齐背景随图带走，分栏拖柄随模式出现/关闭。"""
+        if self._horizontal:
+            self.bcols.setChecked(False)
+            return
         if self.long_arr is None or self._prev is None:
             return
         if self.bcols.isChecked():
@@ -630,6 +778,7 @@ class LongShotBar(QWidget):
         la, _ls = self._colL.feed(frame[:, :dx])
         ra, _rs = self._colR.feed(frame[:, dx:])
         if la > 0 or ra > 0:
+            self._lock_direction()
             self._miss = 0
             side = "双栏" if la > 0 and ra > 0 else ("左栏" if la > 0 else "右栏")
             self.msg.setText(f"拼接中 · {side} +{max(la, ra)} 行")
@@ -806,6 +955,7 @@ class LongShotBar(QWidget):
         return True
 
     def _release_images(self):
+        self._horizontal_state = None
         self.long_arr = None
         self._prev = None
         self._prev_full = None
@@ -827,6 +977,7 @@ class LongShotBar(QWidget):
         self.running = False
         self._sync_scroll_link()
         self.dot.set_active(False)
+        self.baxis.setEnabled(False)
         self._restore_cursor()
         h, w = self.long_arr.shape[:2]
         img = QImage(self.long_arr.data, w, h, self.long_arr.strides[0], QImage.Format_RGB888).copy()
@@ -911,6 +1062,77 @@ class _ColumnState:
             return 0, score
         self.prev = frame.copy()
         return -1, score
+
+
+class _HorizontalState:
+    """Register consecutive viewports, then append only verified new columns.
+
+    Repeated grid lines can give a perfect local NCC score at a wrong column.
+    Full-overlap pixel verification, including text, decides the displacement.
+    """
+    def __init__(self, first_frame):
+        self.long = first_frame.copy()
+        self.prev = first_frame.copy()
+        self.frames = 1
+
+    def feed(self, frame):
+        if frame.ndim != 3 or frame.shape != self.prev.shape:
+            return -1, 0.
+        if float(np.abs(self.prev.astype(np.int16)-frame.astype(np.int16)).mean()) < .5:
+            return 0,1.
+        left = _static_rows(self.prev.transpose(1,0,2),frame.transpose(1,0,2),True,tol=.1)
+        fixed_right = _static_rows(self.prev.transpose(1,0,2),frame.transpose(1,0,2),False,tol=.1)
+        right = frame.shape[1]-fixed_right
+        width = right-left
+        if width < 80:
+            return -1,0.
+        band = max(32,width//3)
+        begin = right-band
+        previous = _gray_f(self.prev).T
+        current = _gray_f(frame).T
+        k = max(1,frame.shape[0]//128)
+        template = _col_compress(previous[begin:right],k)
+        search = _col_compress(current[left:right],k)
+        centered = template-template.mean()
+        norm = float(np.sqrt((centered*centered).sum()))
+        if norm < 1e-5:
+            return -1,0.
+        scores = []
+        for y in range(begin-left):
+            block = search[y:y+band]
+            centered_block = block-block.mean()
+            denominator = norm*float(np.sqrt((centered_block*centered_block).sum()))
+            score = float((centered*centered_block).sum())/denominator if denominator>1e-6 else -1.
+            scores.append(score)
+        candidates = []
+        # Keep separate peaks: adjacent pixels on the same character are one match.
+        for y in sorted(range(len(scores)),key=lambda y:scores[y],reverse=True):
+            if scores[y]<.5 or len(candidates)>=20:
+                break
+            if any(abs(y-other)<4 for other in candidates):
+                continue
+            candidates.append(y)
+        verified = []
+        stride = max(1,frame.shape[0]//256)
+        for y in candidates:
+            shift = begin-(left+y)
+            if width-shift < max(48,width//4):
+                continue
+            a = self.prev[::stride,left+shift:right].astype(np.int16)
+            b = frame[::stride,left:right-shift].astype(np.int16)
+            error = float(np.abs(a-b).mean())
+            verified.append((error,shift,scores[y]))
+        verified.sort()
+        if not verified or verified[0][0]>2.0:
+            return -1,0.
+        if len(verified)>1 and verified[1][0]-verified[0][0]<.03:
+            return -1,0.  # indistinguishable repeated columns: never invent a distance
+        error,shift,score = verified[0]
+        body = self.long[:,:-fixed_right] if fixed_right else self.long
+        self.long = np.hstack((body,frame[:,right-shift:]))
+        self.prev = frame.copy()
+        self.frames += 1
+        return shift,score
 
 
 class _DividerHandle(QWidget):
