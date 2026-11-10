@@ -30,16 +30,28 @@ _MIN_COLUMN_FRACTION = 0.1
 def grab_array(scr=None, region=None):
     """目标屏抓帧 → numpy RGB 数组（物理分辨率）。region 为逻辑 QRect 时裁剪到该范围。"""
     scr = scr or QGuiApplication.primaryScreen()
-    pm = scr.grabWindow(0)
     if region is not None and region.width() > 4 and region.height() > 4:
         d = scr.devicePixelRatio() or 1.0
+        bounds = QRect(0,0,scr.geometry().width(),scr.geometry().height())
+        region = region.intersected(bounds)
+        if region.isEmpty():
+            return np.empty((0,0,3),dtype=np.uint8)
         x0, y0 = int(region.x() * d), int(region.y() * d)
         x1, y1 = int((region.x() + region.width()) * d), int((region.y() + region.height()) * d)
-        crop = QRect(x0, y0, x1 - x0, y1 - y0).intersected(pm.rect())
+        # Capture the selected region instead of reading back the whole screen.
+        # Align the request to four logical pixels, then crop in physical pixels;
+        # this retains the existing exact origin at 125/150/175% scaling.
+        rx,ry = region.x()//4*4,region.y()//4*4
+        ex = min(bounds.width(),(region.x()+region.width()+3)//4*4)
+        ey = min(bounds.height(),(region.y()+region.height()+3)//4*4)
+        pm = scr.grabWindow(0,rx,ry,ex-rx,ey-ry)
+        crop = QRect(x0-round(rx*d),y0-round(ry*d),x1-x0,y1-y0).intersected(pm.rect())
         if crop.isEmpty():
             return np.empty((0, 0, 3), dtype=np.uint8)
         # 物理像素先裁剪，避免整屏 RGB 转换、整屏数组及第二次选区复制。
         pm = pm.copy(crop)
+    else:
+        pm = scr.grabWindow(0)
     if pm.isNull():
         return np.empty((0, 0, 3), dtype=np.uint8)
     img = pm.toImage().convertToFormat(QImage.Format_RGB888)
@@ -501,6 +513,9 @@ class LongShotBar(QWidget):
         if getattr(self, "_preview", None):
             self._preview.close()
             self._preview = None
+        # Native close/Alt+F4 also releases the extra matching references.
+        # Keep long_arr until edit()/finish() hands the rendered image off.
+        self._horizontal_state = None
         super().closeEvent(ev)
 
     def hideEvent(self, ev):
@@ -648,6 +663,7 @@ class LongShotBar(QWidget):
             self.bcols.setChecked(False)
             self.toggle_dual()
         self._horizontal = enabled
+        self.timer.setInterval(150 if enabled else 400)
         self.baxis.setChecked(enabled)
         self.baxis.setText("横向" if enabled else "纵向")
         self.baxis.setToolTip("横向拼接：先到页面最左侧，再向右慢滑；支持触摸板双指或页面横向滚动条" if enabled
@@ -673,11 +689,14 @@ class LongShotBar(QWidget):
             self._preview.set_arr(self.long_arr)
             self.msg.setText(f"横向拼接 · +{added} px")
         elif added == 0:
+            if self._horizontal_state.revised:
+                self.long_arr = self._horizontal_state.long
+                self._preview.set_arr(self.long_arr)
             self._miss = 0
             self.msg.setText("横向模式 · 等待向右滚动…")
         else:
             self._miss = min(self.MISS_LIMIT, self._miss + 1)
-            self.msg.setText("横向重叠不明确，请保留列标题并慢滑")
+            self.msg.setText("暂未接上，请稍向左退回上一段，再向右慢滑")
         self.update_stat()
         # Uncertain alignment is not completion. Keep the partial image until
         # an explicit copy/save/edit/cancel action, without changing the clipboard.
@@ -1074,18 +1093,102 @@ class _HorizontalState:
         self.long = first_frame.copy()
         self.prev = first_frame.copy()
         self.frames = 1
+        self._references = []
+        self._content_left = None
+        self._match_coverage = 0.
+        self.revised = False
 
     def feed(self, frame):
+        self.revised = False
         if frame.ndim != 3 or frame.shape != self.prev.shape:
             return -1, 0.
-        if float(np.abs(self.prev.astype(np.int16)-frame.astype(np.int16)).mean()) < .5:
+        if float(np.abs(self.prev.astype(np.int16)-frame.astype(np.int16)).mean()) < .05:
             return 0,1.
+        previous = self.prev
+        position = self.long.shape[1]-frame.shape[1]
+        def locate(reference):
+            self.prev = reference
+            self._match_coverage = 0.
+            result = self._match_table(frame)
+            if result is None:
+                result = self._match_pixels(frame)
+            return result,self._match_coverage
+        candidates = []
+        try:
+            current,coverage = locate(previous)
+            if current is not None and current[2]>=0 and current[3]>0:
+                candidates.append((coverage,current[3],position+current[2],current,False))
+            # A table header can update a frame later than its body. Keep two
+            # bounded earlier views, with absolute offsets, so a mixed latest
+            # view cannot permanently poison the only matching reference.
+            retry = (current is None or current[2]<=0 or current[3]<=0 or coverage<.5)
+            if retry:
+                for reference,offset in reversed(self._references):
+                    match,support = locate(reference)
+                    if match is not None and match[2]>=0 and match[3]>0:
+                        candidates.append((support,match[3],offset+match[2],match,True))
+        finally:
+            self.prev = previous
+        if not candidates:
+            if current is not None and current[2]==0:
+                return 0,current[3]
+            return -1,0.
+        support,score,new_position,match,historical = max(
+            candidates,key=lambda item:(round(item[0],2),round(item[1],3),not item[4]))
+        left,right = match[:2]
+        shift = new_position-position
+        if shift<0 or (shift==0 and not historical):
+            return 0,score
+        fixed_right = frame.shape[1]-right
+        body = self.long[:,:-fixed_right] if fixed_right else self.long
+        result = np.hstack((body,frame[:,right-shift:])) if shift else self.long.copy()
+        top = _static_rows(self.prev,frame,True,tol=.1)
+        bottom = _static_rows(self.prev,frame,False,tol=.1)
+        # A few stationary border/padding pixels are part of the table, not a
+        # separate heading; they must also receive the shadow cleanup.
+        if top<max(32,frame.shape[0]//10): top = 0
+        if bottom<max(32,frame.shape[0]//10): bottom = 0
+        # The old viewport's right shadow is not document content. Refresh the
+        # overlap from the unobscured middle of the new viewport, instead of
+        # baking one shadow stripe into every seam.
+        if self._content_left is None:
+            self._content_left = left
+        content_left = self._content_left
+        guard = min(32,(right-content_left)//8)
+        # The current right edge is also the output's right edge. Refresh it
+        # completely, including the fixed panel, so a small step cannot leave
+        # the previous edge's shadow stranded inside the image.
+        start,end = content_left+guard,frame.shape[1]
+        origin = self.long.shape[1]-frame.shape[1]+shift
+        if end>start:
+            end_row = frame.shape[0]-bottom
+            if not shift:
+                end_row = min(end_row,max(64,frame.shape[0]//4))
+            if end_row>top:
+                result[top:end_row,origin+start:origin+end] = frame[top:end_row,start:end]
+        # A stationary page heading/footer belongs in the output once. Extend
+        # its paper background rather than stamping its controls at each seam.
+        for rows in (slice(0,top),slice(frame.shape[0]-bottom,frame.shape[0])):
+            if result[rows].shape[0]:
+                result[rows,:self.long.shape[1]] = self.long[rows]
+                background = np.median(self.prev[rows],axis=1).astype(np.uint8)
+                result[rows,self.long.shape[1]:] = background[:,None,:]
+        self.long = result
+        if shift:
+            self._references.append((previous,position))
+            del self._references[:-2]
+        self.prev = frame.copy()
+        self.frames += bool(shift)
+        self.revised = shift==0
+        return shift,score
+
+    def _match_pixels(self, frame):
         left = _static_rows(self.prev.transpose(1,0,2),frame.transpose(1,0,2),True,tol=.1)
         fixed_right = _static_rows(self.prev.transpose(1,0,2),frame.transpose(1,0,2),False,tol=.1)
         right = frame.shape[1]-fixed_right
         width = right-left
         if width < 80:
-            return -1,0.
+            return None
         band = max(32,width//3)
         begin = right-band
         previous = _gray_f(self.prev).T
@@ -1096,9 +1199,9 @@ class _HorizontalState:
         centered = template-template.mean()
         norm = float(np.sqrt((centered*centered).sum()))
         if norm < 1e-5:
-            return -1,0.
+            return None
         scores = []
-        for y in range(begin-left):
+        for y in range(begin-left+1):
             block = search[y:y+band]
             centered_block = block-block.mean()
             denominator = norm*float(np.sqrt((centered_block*centered_block).sum()))
@@ -1124,15 +1227,112 @@ class _HorizontalState:
             verified.append((error,shift,scores[y]))
         verified.sort()
         if not verified or verified[0][0]>2.0:
-            return -1,0.
+            return None
         if len(verified)>1 and verified[1][0]-verified[0][0]<.03:
-            return -1,0.  # indistinguishable repeated columns: never invent a distance
+            return None  # indistinguishable repeated columns: never invent a distance
         error,shift,score = verified[0]
-        body = self.long[:,:-fixed_right] if fixed_right else self.long
-        self.long = np.hstack((body,frame[:,right-shift:]))
-        self.prev = frame.copy()
-        self.frames += 1
-        return shift,score
+        changed = np.flatnonzero(np.abs(self.prev.astype(np.int16)-frame.astype(np.int16)).mean(axis=(1,2))>.5)
+        if len(changed):
+            self._match_coverage = (int(changed[-1])-int(changed[0])+1)/frame.shape[0]
+        return left,right,shift,score
+
+    def _match_table(self, frame):
+        """None means insufficient structure; -1 vetoes an unverified match."""
+        # Horizontal edges preserve the text and column structure while ignoring
+        # a row's uniform hover tint. Static controls above a table contribute no
+        # moving edges and must not vote for a zero displacement.
+        def edges(image):
+            gray = _gray_f(image)
+            # CSS hover usually replaces the paper background while leaving
+            # text and borders unchanged. Normalize ink contrast first so that
+            # a tinted frozen row cannot masquerade as moving columns.
+            background = np.median(gray,axis=1,keepdims=True)
+            gray = np.clip(np.abs(gray-background)-32,0,48)
+            pad = np.pad(gray,((0,0),(2,2)),mode='edge')
+            smooth = (pad[:,:-4]+4*pad[:,1:-3]+6*pad[:,2:-2]+4*pad[:,3:-1]+pad[:,4:])/16
+            return np.clip(np.diff(smooth,axis=1,append=smooth[:,-1:]),-24,24)
+        sampling = max(1,(frame.shape[0]+255)//256)
+        a,b = edges(self.prev[::sampling]),edges(frame[::sampling])
+        difference = np.abs(a-b)
+        rows = np.flatnonzero(difference.mean(axis=1)>.6)
+        if len(rows)<8:
+            return None
+        active = difference[rows].mean(axis=0)>.8
+        columns = np.flatnonzero(active)
+        if len(columns)<24:
+            return None
+        left,right = int(columns[0]),int(columns[-1])+1
+        guard = min(24,(right-left)//12)
+        lo,hi = left+guard,right-guard
+        width = hi-lo
+        if width<80:
+            return None
+        rows = rows[::max(1,(len(rows)+95)//96)]
+        previous,current = a[rows,lo:hi],b[rows,lo:hi]
+        first,last = int(rows[0]*sampling),min(frame.shape[0],int((rows[-1]+1)*sampling))
+        self._match_coverage = (last-first)/frame.shape[0]
+        # Preserve every pixel row of the column headings during verification.
+        # Sparse candidate-search rows can otherwise miss the one stroke that
+        # distinguishes two neighboring subject names or numbers.
+        source_rows = np.unique(np.r_[np.arange(first,min(first+64,last)),
+                                     np.arange(first,last,max(1,(last-first)//128))])
+        # Check both directions and zero. A suffix-only template can mistake a
+        # backward move by one column for a forward move by the grid period.
+        # Compress only the non-moving axis for the candidate search. Keep the
+        # existing small numpy package; no FFT/OpenCV runtime is required.
+        compression = max(1,len(rows)//16)
+        old_coarse = _col_compress(previous.T,compression).T
+        new_coarse = _col_compress(current.T,compression).T
+        old_energy = np.r_[0.,np.cumsum((old_coarse*old_coarse).sum(axis=0),dtype=np.float64)]
+        new_energy = np.r_[0.,np.cumsum((new_coarse*new_coarse).sum(axis=0),dtype=np.float64)]
+        maximum = width-max(64,width//3)
+        shifts = list(range(-maximum,maximum+1))
+        scores = []
+        for shift in shifts:
+            if shift>=0:
+                energy = (old_energy[-1]-old_energy[shift])*new_energy[width-shift]
+                product = (old_coarse[:,shift:]*new_coarse[:,:width-shift]).sum()
+            else:
+                energy = old_energy[width+shift]*(new_energy[-1]-new_energy[-shift])
+                product = (old_coarse[:,:width+shift]*new_coarse[:,-shift:]).sum()
+            denominator = float(np.sqrt(max(0.,energy)))
+            scores.append(float(product)/denominator if denominator>1e-6 else -1.)
+        peaks = []
+        for index in sorted(range(len(scores)),key=lambda index:scores[index],reverse=True):
+            if scores[index]<.65 or len(peaks)>=20:
+                break
+            if not any(abs(index-other)<4 for other in peaks):
+                peaks.append(index)
+        verified = []
+        for index in peaks:
+            shift = shifts[index]
+            similarity = scores[index]
+            if similarity<.9:
+                continue
+            old_start,new_start = lo+max(shift,0),lo+max(-shift,0)
+            overlap = width-abs(shift)
+            old = self.prev[source_rows,old_start:old_start+overlap].astype(np.float32)
+            new = frame[source_rows,new_start:new_start+overlap].astype(np.float32)
+            # An alpha-blended hover changes both background and text contrast.
+            # Fit only a small, uniform per-row color transform; distinct text
+            # still has to agree over the complete overlap.
+            old -= old.mean(axis=1,keepdims=True)
+            new -= new.mean(axis=1,keepdims=True)
+            energy = (old*old).sum(axis=1,keepdims=True)
+            gain = np.divide((old*new).sum(axis=1,keepdims=True),energy,
+                             out=np.ones_like(energy),where=energy>1)
+            gain = np.clip(gain,.75,1.3334)
+            delta = new-old*gain
+            verified.append((float(np.abs(delta).mean()),shift,similarity))
+        verified.sort()
+        if not verified or verified[0][0]>4.:
+            # An analyzed but incompatible table must not fall through to the
+            # suffix matcher: repeated grid lines can look locally convincing.
+            return left,right,-1,0.
+        if len(verified)>1 and verified[1][0]-verified[0][0]<max(.1,verified[0][0]*.15):
+            return left,right,0,0.  # repeating cells supply no trustworthy distance
+        error,shift,score = verified[0]
+        return left,right,max(0,shift),score
 
 
 class _DividerHandle(QWidget):

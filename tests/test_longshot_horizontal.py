@@ -69,8 +69,10 @@ class HorizontalToolbarTests(unittest.TestCase):
 
     def test_direction_control_is_discoverable_and_horizontal_has_no_dual_actions(self):
         self.assertIn('纵向',self.bar.baxis.text())
+        self.assertEqual(self.bar.timer.interval(),400)
         self.bar.bcols.click()
         self.bar.set_horizontal(True)
+        self.assertEqual(self.bar.timer.interval(),150)
         self.assertTrue(self.bar._horizontal)
         self.assertFalse(self.bar._dual)
         self.assertTrue(self.bar.bcols.isHidden())
@@ -79,6 +81,7 @@ class HorizontalToolbarTests(unittest.TestCase):
         self.assertIsNone(self.bar._divider)
         self.assertIsNone(self.bar._scroll_link._configuration)
         self.bar.set_horizontal(False)
+        self.assertEqual(self.bar.timer.interval(),400)
         self.assertFalse(self.bar.bcols.isHidden())
 
     def test_switching_to_horizontal_clears_an_active_link_session(self):
@@ -138,5 +141,37 @@ class HorizontalToolbarTests(unittest.TestCase):
             finish.assert_not_called()
             self.assertTrue(self.bar.running)
             self.assertIsNotNone(self.bar.long_arr)
+
+    def test_header_only_refresh_reaches_preview_without_growing_image(self):
+        def frame(body,header):
+            result=self.page[:,body:body+400].copy()
+            result[:40]=self.page[:40,header:header+400]
+            return result
+        self.bar.set_horizontal(True)
+        for body,header in ((80,80),(84,80),(186,186),(200,196),(200,200)):
+            self.source.return_value=frame(body,header);self.bar.grab()
+        self.assertEqual(self.bar.long_arr.shape[1],600)
+        np.testing.assert_array_equal(self.bar.long_arr,self.page[:,:600])
+        self.assertIsNotNone(self.bar._preview._pm)
+
+    def test_history_is_bounded_and_cancel_releases_its_arrays(self):
+        import weakref
+        self.bar.set_horizontal(True)
+        for x in (80,160,240,320):
+            self.source.return_value=self.page[:,x:x+400].copy();self.bar.grab()
+            self.assertLessEqual(len(self.bar._horizontal_state._references),2)
+        watched=[weakref.ref(array) for array,position in self.bar._horizontal_state._references]
+        self.bar.cancel()
+        self.assertTrue(all(reference() is None for reference in watched))
+
+    def test_native_close_releases_extra_matching_references(self):
+        import weakref
+        self.bar.set_horizontal(True)
+        for x in (80,160,240):
+            self.source.return_value=self.page[:,x:x+400].copy();self.bar.grab()
+        watched=[weakref.ref(array) for array,position in self.bar._horizontal_state._references]
+        self.bar.close()
+        self.assertIsNone(self.bar._horizontal_state)
+        self.assertTrue(all(reference() is None for reference in watched))
 
 if __name__=='__main__':unittest.main()
