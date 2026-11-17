@@ -77,6 +77,8 @@ class LongCanvas(QWidget):
         self.redo_stack = []
         self.cur_tool = "rect"
         self.cur_color = capture.COLORS[0]
+        self.cur_text_background = None
+        self._choosing_text_background = False
         self.cur_size = 2
         # R100 标注属性（与截图侧同名同语义；_paint_nums/_paint_shape 委托 capture 版时按 self 解析）
         self.cur_num_style = "num"         # 序号样式：num/upper/lower/uroman/lroman
@@ -154,6 +156,12 @@ class LongCanvas(QWidget):
     _begin_stamp_resize = capture.ShotOverlay._begin_stamp_resize
     _handle_drag_rect = capture.ShotOverlay._handle_drag_rect
     _select_and_drag = capture.ShotOverlay._select_and_drag
+    _selected_text = capture.ShotOverlay._selected_text
+    _text_editor_focus_out = capture.ShotOverlay._text_editor_focus_out
+    text_background = capture.ShotOverlay.text_background
+    text_color = capture.ShotOverlay.text_color
+    set_text_background = capture.ShotOverlay.set_text_background
+    set_color = capture.ShotOverlay.set_color
     _delete_selected = capture.ShotOverlay._delete_selected
     _sel_scalable = capture.ShotOverlay._sel_scalable   # R74：选中态分级门槛（文字/序号不可缩放）
     _delete_hover = capture.ShotOverlay._delete_hover   # R78：悬浮即删（命中走本类 _hit_num/_hit_text/_hit_shape）
@@ -171,6 +179,11 @@ class LongCanvas(QWidget):
 
     def _rerender_anno(self):
         """截图侧 stamps 画进 anno 位图须重渲；长图 paintEvent 现画无此层——适配借用链的空实现。"""
+
+    def _refresh_prop_btns(self):
+        props = getattr(self.window(), "props_pop", None)
+        if props is not None:
+            props.sync()
 
     def _resize_to_bbox(self, s, ob, nb):
         """标注从原包围盒 ob 映射到新包围盒 nb（同截图侧算法；字号 clamp 随图宽 _s，
@@ -281,7 +294,7 @@ class LongCanvas(QWidget):
                 return d <= 1.0
             return QRect(s["r"]).contains(pos)
         if k == "text":
-            return QRect(s["r"]).contains(pos)
+            return self._stamp_bbox(s).contains(pos)
         if k == "mosaic":
             bs = s["bs"]
             return any(QRect(tx, ty, bs, bs).contains(pos) for tx, ty, _ in s["tiles"])
@@ -558,6 +571,8 @@ class LongCanvas(QWidget):
         if self._drawing and self._live is not None:
             capture.ShotOverlay._paint_shape(self, p, self._live)   # high live＝纯边框（洞已并入并集）
         p.restore()
+        if self.text_editor is not None:
+            self.text_editor.paint_background(p)
         p.end()
 
     # ---- 鼠标（图坐标；交互同截图侧）----
@@ -779,6 +794,8 @@ class LongCanvas(QWidget):
         # fs/color 缺省＝当前工具值；双击再编辑传入原对象值（同截图侧 _reedit_text：保真不跳样）
         fs_img = max(12, round((12 + self.cur_size) * self._s)) if fs is None else fs
         color = self.cur_color if color is None else color
+        if idx is None:
+            color = capture._text_foreground_for_background(self.cur_text_background, color)
         point = self._to_view(img_pos)
         dx = max(0, min(point.x(), self.width() - 60))
         dy = max(0, min(point.y(), self.height() - 30))
@@ -786,6 +803,7 @@ class LongCanvas(QWidget):
                                                 max(9, round(fs_img * self._k)), color)
         t._fs_img, t._color = fs_img, color
         t._idx = idx                              # 双击再编辑：提交时原位替换该对象
+        t.background_color = self.stamps[idx].get("bg") if idx is not None else self.cur_text_background
         self.text_editor = t
         if idx is not None:
             self._text_edit_idx = idx             # 再编辑期间底层文字让位（R79 防重影），提交/取消恢复
@@ -799,6 +817,7 @@ class LongCanvas(QWidget):
         t.show()
         t.setFocus()
         t.installEventFilter(self)
+        self._refresh_prop_btns()
 
     def commit_text_editor(self):
         """失焦/确认：浮层文字落成文字对象（空＝丢弃）。回车换行已发生在编辑中。"""
@@ -827,6 +846,8 @@ class LongCanvas(QWidget):
         s = {"kind": "text", "lines": lines, "color": color, "fs": fs_img,
              "asc": fm.ascent(), "lh": fm.lineSpacing(),
              "r": QRect(top.x(), top.y(), w + 2, fm.lineSpacing() * len(lines) + 2)}
+        if t.background_color:
+            s["bg"] = t.background_color
         self._text_edit_idx = None                # 提交后底层恢复上屏（R79）
         self.push_undo()
         if idx is not None and 0 <= idx < len(self.stamps) and self.stamps[idx]["kind"] == "text":
@@ -834,6 +855,7 @@ class LongCanvas(QWidget):
         else:
             self.stamps.append(s)
         self.update()
+        self._refresh_prop_btns()
 
     def cancel_text_editor(self):
         t = self.text_editor
@@ -844,6 +866,7 @@ class LongCanvas(QWidget):
         t.deleteLater()
         self.setFocus()
         self.update()
+        self._refresh_prop_btns()
 
     # ---- 序号（与截图同语义：点击落标 → 附言所见即所得；右键圆标删除自动重排）----
     def num_radius(self):
@@ -956,7 +979,7 @@ class LongCanvas(QWidget):
                 # R122 同步提交，与截图侧一致：FocusOut 先于 press 派发，press 里 had_edit=False，
                 # 同一击继续走工具分支——文本工具下＝落旧字同时新位置直接开输入框（B2 用户要求
                 # 与截图侧统一；R81 的延迟提交曾让此击只落字、再点才开输入，行为分叉于此回摆）
-                self.commit_text_editor()
+                self._text_editor_focus_out()
                 return False
             if ev.type() == QEvent.Type.KeyPress and ev.key() == Qt.Key_Escape:
                 self.cancel_text_editor()
@@ -993,6 +1016,8 @@ class LongCanvas(QWidget):
             self.stamps = [_clone_stamp(s) for s in snaps]
             self._nums = [self._clone_num(n) for n in nums]
             self.undo_stack.pop()         # 同截图侧：先恢复栈顶快照再弹出（先弹后恢会多退一级）
+            if self.cur_tool == "text":
+                self._refresh_prop_btns()
             self.update()
             self.changed.emit()
 
@@ -1002,6 +1027,8 @@ class LongCanvas(QWidget):
             snaps, nums = self.redo_stack.pop()
             self.stamps = [_clone_stamp(s) for s in snaps]
             self._nums = [self._clone_num(n) for n in nums]
+            if self.cur_tool == "text":
+                self._refresh_prop_btns()
             self.update()
             self.changed.emit()
 
@@ -1362,9 +1389,7 @@ class LongEditor(QWidget):
         self.canvas.setFocus(Qt.OtherFocusReason)
 
     def set_color(self, c):
-        self.canvas.cur_color = c
-        if getattr(self, "props_pop", None):      # R134：色点已迁入辐条，选中态由 pop 同步
-            self.props_pop.sync()
+        self.canvas.set_color(c)
 
     def set_size(self, v):
         self.canvas.cur_size = v

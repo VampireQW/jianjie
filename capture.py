@@ -6,10 +6,10 @@ import time
 
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QImage,
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QIcon, QImage,
                            QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QRegion,
                            QTextCursor, QTextLayout, QTextOption)
-from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+from PySide6.QtWidgets import (QApplication, QColorDialog, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
                                QSizePolicy, QSpacerItem, QTextEdit, QWidget, QVBoxLayout)
 
 import common as C
@@ -42,6 +42,32 @@ SHOT_ACT_LITE_SKIP = ("ocr", "rec")     # R107/R108 轻量版裁 OCR/录屏钮�
 HIGH_DIM_STEPS = (148, 195, 230, 255)
 HIGH_DIM_DEFAULT = HIGH_DIM_STEPS[0]
 COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#ffffff", "#111111"]
+COLOR_NAMES = ("红色", "橙色", "绿色", "蓝色", "白色", "黑色")
+TEXT_BACKGROUNDS = ((None, "无底色"), *zip(COLORS, COLOR_NAMES))
+
+
+def _text_background_rect(rect, font_size):
+    horizontal = max(2, round(font_size * .28))
+    vertical = max(1, round(font_size * .12))
+    return rect.adjusted(-horizontal, -vertical, horizontal, vertical)
+
+
+def _text_foreground_for_background(background, fallback):
+    if not background:
+        return fallback
+    return COLORS[-1] if QColor(background) == QColor("#ffffff") else "#ffffff"
+
+
+def _paint_text_background(painter, rect, font_size, color):
+    if not color or not QColor(color).isValid() or rect.isEmpty():
+        return
+    radius = min(max(2, round(font_size * .3)), rect.width() / 2, rect.height() / 2)
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(color))
+    painter.drawRoundedRect(QRectF(rect), radius, radius)
+    painter.restore()
 
 
 class ColorDot(QPushButton):
@@ -177,7 +203,7 @@ class ToolPropsPop(QWidget):
         _sp(self._cs_spacers)
         self._cs_widgets.append(f)
         self._swatches = {}
-        color_names = dict(zip(COLORS, ("红色", "橙色", "绿色", "蓝色", "白色", "黑色")))
+        color_names = dict(zip(COLORS, COLOR_NAMES))
         for c in COLORS:
             b = _SwatchBtn(c, color_names[c], lambda _, cc=c: self.ov.set_color(cc))
             b.setChecked(c == self.ov.cur_color)
@@ -209,9 +235,15 @@ class ToolPropsPop(QWidget):
                                        lambda: self.ov._cycle_num_start())
         self._btn_high_shape = _opt_btn("聚光形态：矩形/椭圆；选中聚光时点击＝改该对象",
                                         lambda: self.ov._cycle_high_shape())
+        self._btn_text_background = _opt_btn("文字底色", self._pick_text_background)
+        self._btn_text_background.setText("底色 ▾")
+        self._btn_text_background.setAccessibleName("文字底色")
+        self._btn_text_background.setFocusPolicy(Qt.StrongFocus)
+        self._btn_text_background.setProperty("keepsAnnotationEditor", True)
         self._opt_widgets = {"arrow": (self._btn_arrow_style,),
                              "num": (self._btn_num_style, self._btn_num_start),
-                             "high": (self._btn_high_shape,)}
+                             "high": (self._btn_high_shape,),
+                             "text": (self._btn_text_background,)}
         self.adjustSize()
 
     def set_tool(self, tool):
@@ -235,10 +267,12 @@ class ToolPropsPop(QWidget):
         self.adjustSize()
 
     def sync(self):
+        canvas = getattr(self.ov, "canvas", self.ov)
+        active_color = canvas.text_color() if canvas.cur_tool == "text" else self.ov.cur_color
         for size, b in self._size_dots:
             b.setChecked(size == self.ov.cur_size)
         for c, b in self._swatches.items():
-            b.setChecked(c == self.ov.cur_color)
+            b.setChecked(c == active_color)
         ov = self.ov
         self._btn_arrow_style.setText("锥" if getattr(ov, "cur_arrow_style", "line") == "solid" else "线")
         self._btn_num_style.setText(ov._num_label(0))
@@ -251,6 +285,57 @@ class ToolPropsPop(QWidget):
         self._btn_high_shape.setIcon(icons.icon(
             "ellipse" if ov.cur_high_shape == "ellipse" else "rect", "#93c5fd", 16, dpr))
         self._btn_high_shape.setIconSize(QSize(16, 16))
+        if not self._btn_text_background.isHidden():
+            color = canvas.text_background()
+            self._btn_text_background.setIcon(self._background_icon(color))
+            self._btn_text_background.setIconSize(QSize(14, 14))
+            self._btn_text_background.setToolTip("文字底色 · " + (color.upper() if color else "无底色"))
+
+    def _background_icon(self, color):
+        scale = self.devicePixelRatioF()
+        pixmap = QPixmap(round(14 * scale), round(14 * scale))
+        pixmap.setDevicePixelRatio(scale)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#9cb1ce"), 1))
+        painter.setBrush(QColor(color) if color else Qt.NoBrush)
+        painter.drawRoundedRect(QRectF(1.5, 1.5, 11, 11), 2, 2)
+        if not color:
+            painter.drawLine(QPointF(3, 11), QPointF(11, 3))
+        painter.end()
+        return QIcon(pixmap)
+
+    def _pick_text_background(self):
+        canvas = getattr(self.ov, "canvas", self.ov)
+        initial = canvas.text_background()
+        editor = canvas.text_editor
+        menu = QMenu(self)
+        menu.setStyleSheet(C.UI_MENU_QSS)
+        choices = {}
+        for color, label in TEXT_BACKGROUNDS:
+            action = menu.addAction(self._background_icon(color), label)
+            action.setCheckable(True)
+            action.setChecked(color == initial)
+            choices[action] = color
+        menu.addSeparator()
+        custom = menu.addAction("自定义颜色…")
+        canvas._choosing_text_background = True
+        try:
+            button = self._btn_text_background
+            chosen = menu.exec(button.mapToGlobal(QPoint(0, button.height() + 4)))
+            if chosen == custom:
+                color = QColorDialog.getColor(QColor(initial or COLORS[1]), self, "选择文字底色",
+                                              QColorDialog.DontUseNativeDialog)
+                if color.isValid():
+                    canvas.set_text_background(color.name())
+            elif chosen in choices:
+                canvas.set_text_background(choices[chosen])
+        finally:
+            canvas._choosing_text_background = False
+            menu.deleteLater()
+            if editor is not None and editor is canvas.text_editor:
+                editor.setFocus(Qt.OtherFocusReason)
 
 
 def active_screen():
@@ -486,6 +571,37 @@ def create_overlays(on_finished, ocr=False, scan=False, pick=False, frozen=None)
 
 class AnnotationTextEdit(QTextEdit):
     """在 Qt 完成输入排版后同步视口，避免隐藏滚动条把首行滚走。"""
+    background_color = None
+
+    def set_annotation_color(self, color):
+        self._color = color
+        self.setStyleSheet("QTextEdit{background:transparent;border:none;padding:0px;color:%s;"
+                          "font-family:'Microsoft YaHei UI';font-size:%dpt;font-weight:bold;}"
+                          % (color, self.font().pointSize()))
+
+    def refresh_background(self):
+        previous = getattr(self, "background_rect", QRect())
+        self.background_rect = QRect()
+        if self.background_color:
+            width, lines = 0., 0
+            block = self.document().begin()
+            while block.isValid():
+                layout = block.layout()
+                for row in range(layout.lineCount()):
+                    width = max(width, layout.lineAt(row).naturalTextWidth())
+                    lines += 1
+                block = block.next()
+            if width > 0:
+                height = lines * QFontMetrics(self.font()).lineSpacing() + 2
+                rect = QRect(self.pos(), QSize(min(self.width(), math.ceil(width) + 2), height))
+                self.background_rect = _text_background_rect(rect, self.font().pointSize())
+        region = previous.united(self.background_rect)
+        if not region.isEmpty():
+            self.parentWidget().update(region)
+
+    def paint_background(self, painter):
+        if self.background_color and hasattr(self, "background_rect"):
+            _paint_text_background(painter, self.background_rect, self.font().pointSize(), self.background_color)
 
     def inputMethodEvent(self, ev):
         self._composing = bool(ev.preeditString())
@@ -555,6 +671,8 @@ class ShotOverlay(QWidget):
         self._select_dragging = False
         self.cur_tool = "rect"
         self.cur_color = "#ef4444"
+        self.cur_text_background = None
+        self._choosing_text_background = False
         self.cur_size = 2                  # 默认「细」：必须取工具条粗细枚举 (2,4,7) 之一，否则无选中项
         # R100 标注属性（会话级默认值；与 cur_color/cur_size 同纪律不持久化）：
         self.cur_num_style = "num"         # 序号样式：num/upper/lower/uroman/lroman
@@ -696,6 +814,8 @@ class ShotOverlay(QWidget):
                     self._paint_nums(p)    # 序号层对象化现画：可删除、删除后自动重排
                     if self.cur_tool == "num":
                         self._paint_num_del(p)   # × 删除手柄只上屏，不进导出
+                if self.text_editor is not None:
+                    self.text_editor.paint_background(p)
             p.restore()
             p.setPen(QPen(QColor(SEL_GREEN), 1.6))
             p.setBrush(Qt.NoBrush)
@@ -894,6 +1014,8 @@ class ShotOverlay(QWidget):
         """选中标注并进入拖动：序号走 _drag_num 老机制，形状走快照重建。"""
         self.setCursor(Qt.SizeAllCursor)   # 按住拖拽＝十字移动（序号/形状/文字/高亮框共用此入口）
         self.sel_stamp = (tag, i)
+        if self.cur_tool == "text":
+            self._refresh_prop_btns()
         self._drag_moved = False
         self._drag_shape = None
         if tag == "num":
@@ -1279,6 +1401,8 @@ class ShotOverlay(QWidget):
             self.stamps = [self._clone_entry(s) for s in stamps]
             self.sel_stamp = None
             self.undo_stack.pop()              # （先弹后恢会一次回退两个动作）
+            if self.cur_tool == "text":
+                self._refresh_prop_btns()
             self.update()
 
     # ---------- 标注引擎：全部对象化，整层重画（选中/移动/缩放/撤销共用） ----------
@@ -1470,6 +1594,9 @@ class ShotOverlay(QWidget):
             # R121：压暗由 _paint_high_dim 并集统一渲染，对象层只画边框
             self._draw_high_border(p, s["r"], s.get("shape", "rect"))
         elif k == "text":
+            background = s.get("bg")
+            if isinstance(background, str) and QColor(background).isValid():
+                _paint_text_background(p, _text_background_rect(s["r"], s["fs"]), s["fs"], background)
             p.setFont(QFont("Microsoft YaHei UI", s["fs"], QFont.Bold))
             p.setPen(QColor(s["color"]))
             y = s["r"].top() + s["asc"]
@@ -1903,6 +2030,8 @@ class ShotOverlay(QWidget):
     # ---------- 标注对象：命中/选中/移动/缩放/删除 ----------
     def _stamp_bbox(self, s):
         k = s["kind"]
+        if k == "text" and s.get("bg"):
+            return _text_background_rect(s["r"], s["fs"])
         if k in ("rect", "ellipse", "high", "text"):
             return QRect(s["r"])
         if k == "arrow":
@@ -1976,7 +2105,7 @@ class ShotOverlay(QWidget):
                 return d <= 1.0
             return QRect(s["r"]).contains(pos)
         if k == "text":
-            return QRect(s["r"]).contains(pos)
+            return self._stamp_bbox(s).contains(pos)
         if k == "mosaic":
             bs = s["bs"]
             return any(QRect(tx, ty, bs, bs).contains(pos) for tx, ty, _ in s["tiles"])
@@ -1991,7 +2120,7 @@ class ShotOverlay(QWidget):
     def _hit_text(self, pos):
         for i in range(len(self.stamps) - 1, -1, -1):
             s = self.stamps[i]
-            if s["kind"] == "text" and QRect(s["r"]).contains(pos):
+            if s["kind"] == "text" and self._stamp_bbox(s).contains(pos):
                 return i
         return None
 
@@ -2207,8 +2336,7 @@ class ShotOverlay(QWidget):
         t.setFont(QFont("Microsoft YaHei UI", fs, QFont.Bold))
         # 全量显式声明：LongEditor 挂 BASE_QSS（QTextEdit 全局 font-size:13px+padding:7px/10px+border），
         # 祖先 QSS 优先级高于 setFont——不逐条压过，浮层字号被锁死、padding 吃掉视口把首行滚走（长图侧实锤）。
-        t.setStyleSheet("QTextEdit{background:transparent;border:none;padding:0px;color:%s;"
-                        "font-family:'Microsoft YaHei UI';font-size:%dpt;font-weight:bold;}" % (color, fs))
+        t.set_annotation_color(color)
         t.move(QPoint(max(0, pos.x()), max(0, pos.y())))
         t.textChanged.connect(lambda: self._fit_anno_editor(t))
         C.follow_system_input_locale()  # R83：让候选框接管按键，不再落到默认英文键盘
@@ -2222,11 +2350,14 @@ class ShotOverlay(QWidget):
         self.commit_text_editor()
         fs = 12 + self.cur_size if fs is None else fs
         color = self.cur_color if color is None else color
+        if idx is None:
+            color = _text_foreground_for_background(self.cur_text_background, color)
         sel = self.sel or QRect(0, 0, self.width(), self.height())
         pos = QPoint(max(sel.left(), min(pos.x(), sel.right() - 47)),
                      max(sel.top(), min(pos.y(), sel.bottom() - 20)))
         t = self._wysiwyg_editor(pos, fs, color)
         t._idx, t._fs, t._color = idx, fs, color
+        t.background_color = self.stamps[idx].get("bg") if idx is not None else self.cur_text_background
         self.text_editor = t
         if idx is not None:
             self._text_edit_idx = idx        # 再编辑期间底层文字让位（R79 防重影），提交/取消恢复
@@ -2238,6 +2369,7 @@ class ShotOverlay(QWidget):
         t.show()
         t.setFocus()
         t.installEventFilter(self)
+        self._refresh_prop_btns()
 
     def _layout_lines(self, text, font, width):
         """按 QTextLayout 在 width 内断行——与浮层 WidgetWidth 软换行同一排版引擎、
@@ -2319,6 +2451,8 @@ class ShotOverlay(QWidget):
                 t.horizontalScrollBar().setValue(0)
         finally:
             t._fitting = False
+        if t is self.text_editor:
+            t.refresh_background()
 
     def commit_text_editor(self):
         """失焦/确认：浮层文字落成文字对象（空＝丢弃）。回车换行已在编辑中发生。"""
@@ -2345,6 +2479,8 @@ class ShotOverlay(QWidget):
         s = {"kind": "text", "lines": lines, "color": color, "fs": fs,
              "asc": fm.ascent(), "lh": fm.lineSpacing(),
              "r": QRect(top.x(), top.y(), w + 2, fm.lineSpacing() * len(lines) + 2)}
+        if t.background_color:
+            s["bg"] = t.background_color
         self._text_edit_idx = None       # 提交后底层恢复上屏（R79）
         self.push_undo()
         if idx is not None and idx < len(self.stamps) and self.stamps[idx]["kind"] == "text":
@@ -2352,6 +2488,7 @@ class ShotOverlay(QWidget):
         else:
             self.stamps.append(s)
         self._rerender_anno()
+        self._refresh_prop_btns()
 
     def cancel_text_editor(self):
         """Esc：丢弃浮层里的文字。"""
@@ -2363,6 +2500,7 @@ class ShotOverlay(QWidget):
         t.deleteLater()
         self.setFocus()
         self._rerender_anno()
+        self._refresh_prop_btns()
 
     def _reedit_text(self, i):
         """双击文字：原地浮层再编辑（提交时替换该对象）。"""
@@ -2483,7 +2621,7 @@ class ShotOverlay(QWidget):
                 self.cancel_text_editor()
                 return True
             if ev.type() == ev.Type.FocusOut:
-                self.commit_text_editor()  # 失焦＝落字（点空白/点工具条/点完成都走这里）
+                self._text_editor_focus_out()
         elif obj is self.text_edit:
             if ev.type() == ev.Type.KeyPress and ev.key() == Qt.Key_Escape:
                 self.cancel_text_edit()
@@ -2692,14 +2830,71 @@ class ShotOverlay(QWidget):
             self.cur_arrow_style = "solid" if self.cur_arrow_style == "line" else "line"
         self._refresh_prop_btns()
 
+    def _selected_text(self):
+        if self.sel_stamp and self.sel_stamp[0] == "shape":
+            index = self.sel_stamp[1]
+            if 0 <= index < len(self.stamps) and self.stamps[index]["kind"] == "text":
+                return self.stamps[index]
+        return None
+
+    def _text_editor_focus_out(self):
+        # Mouse focus reaches the palette button before its clicked signal opens the menu.
+        focus = QApplication.focusWidget()
+        if self._choosing_text_background or (focus is not None and focus.window() is self.window()
+                                              and focus.property("keepsAnnotationEditor")):
+            return
+        self.commit_text_editor()
+
+    def text_background(self):
+        if self.text_editor is not None:
+            return self.text_editor.background_color
+        stamp = self._selected_text()
+        return stamp.get("bg") if stamp is not None else self.cur_text_background
+
+    def text_color(self):
+        if self.text_editor is not None:
+            return self.text_editor._color
+        stamp = self._selected_text()
+        if stamp is not None:
+            return stamp["color"]
+        return _text_foreground_for_background(self.cur_text_background, self.cur_color)
+
+    def set_text_background(self, color):
+        editor = self.text_editor
+        stamp = self._selected_text()
+        if editor is not None:
+            editor.background_color = color
+            editor.set_annotation_color(_text_foreground_for_background(color, editor._color))
+            if editor._idx is None:
+                self.cur_text_background = color
+            editor.refresh_background()
+        elif stamp is not None:
+            foreground = _text_foreground_for_background(color, stamp["color"])
+            if color != stamp.get("bg") or foreground != stamp["color"]:
+                self.push_undo()
+                stamp["color"] = foreground
+                if color:
+                    stamp["bg"] = color
+                else:
+                    stamp.pop("bg", None)
+                self._rerender_anno()
+                self.update()
+        else:
+            self.cur_text_background = color
+        self._refresh_prop_btns()
+
     def set_color(self, c):
         self.cur_color = c
-        if hasattr(self, "props_pop") and self.props_pop:   # R131 浮窗选中态
-            self.props_pop.sync()
         if self.text_editor:               # 编辑中的文字即时换色（所见即所得）
-            self.text_editor._color = c
-            self.text_editor.setStyleSheet(
-                "QTextEdit{background:transparent;border:none;color:%s;}" % c)
+            self.text_editor.set_annotation_color(c)
+        elif self.cur_tool == "text":
+            stamp = self._selected_text()
+            if stamp is not None and stamp["color"] != c:
+                self.push_undo()
+                stamp["color"] = c
+                self._rerender_anno()
+                self.update()
+        self._refresh_prop_btns()
 
     def set_size(self, s):
         self.cur_size = s
