@@ -9,6 +9,8 @@ R117/R119：双栏长截图——选区分左右两栏各跑一套独立拼接�
 滚动归属天然按帧内容区分，不猜光标）；合成时两栏顶对齐，短栏底部自动延续背景，可手动取色。
 R119 收编进长截图本体：拼接条上切换钮即时切单/双栏（保留已拼内容），独立入口全撤。
 R307：可选横向单区域拼接，连续视图的完整重叠验证防重复网格误匹配。"""
+from collections import Counter
+
 import numpy as np
 from PySide6.QtCore import QEvent, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import (QColor, QCursor, QGuiApplication, QIcon, QImage, QPainter,
@@ -197,6 +199,162 @@ def tail_dup(long_arr, frame, s, e, tol=1.0, shift=3):
         if float(np.mean(np.abs(blk - tail[k:k + h]))) < tol:
             return True
     return False
+
+
+def _row_offsets(previous, current):
+    """Vote with distinctive rows, rather than letting blank rows and rules dominate."""
+    positions = {}
+    for y, row in enumerate(previous):
+        if int(row.max()) - int(row.min()) >= 20:
+            positions.setdefault(row.tobytes(), []).append(y)
+    votes = Counter()
+    for y, row in enumerate(current):
+        matches = positions.get(row.tobytes(), ())
+        if 0 < len(matches) <= 4:
+            votes.update(old_y - y for old_y in matches)
+    return votes
+
+
+def _overlap_score(previous, current, previous_ink, current_ink, shift):
+    """Compare the entire overlap where either viewport contains visible detail."""
+    length = len(previous) - abs(shift)
+    if length < max(24, len(previous) // 8):
+        return 0.0
+    old = slice(max(shift, 0), max(shift, 0) + length)
+    new = slice(max(-shift, 0), max(-shift, 0) + length)
+    ink = previous_ink[old] | current_ink[new]
+    if np.count_nonzero(ink) < 48 or np.count_nonzero(ink.any(axis=1)) < 5:
+        return 0.0
+    difference = np.abs(previous[old] - current[new]).max(axis=2)
+    return float(np.mean(difference[ink] <= 12))
+
+
+def _vertical_candidates(previous, current):
+    """Propose shifts after antialiasing or repaint changes row signatures."""
+    a, b = _gray_f(previous), _gray_f(current)
+    band = max(24, min(len(b) // 3, 200))
+    for start in (0, (len(b) - band) // 2, len(b) - band):
+        score, at = _ncc_locate(b, a[start:start + band])
+        if score >= .55:
+            yield start - at
+        score, at = _ncc_locate(a, b[start:start + band])
+        if score >= .55:
+            yield at - start
+
+
+def _vertical_motion(previous, current):
+    """Find a signed displacement with corroboration across the scrolling content."""
+    width = previous.shape[1]
+    margin = width // 12
+    columns = np.linspace(margin, width - margin - 1, min(224, width - 2 * margin), dtype=int)
+    prev = previous[:, columns]
+    frame = current[:, columns]
+    if np.array_equal(prev, frame):
+        return 0, 1.0, 0, 0
+    top = _static_rows(prev, frame, True, tol=.1)
+    bottom = _static_rows(prev, frame, False, tol=.1)
+    viewport = slice(top, len(frame) - bottom)
+    prev = prev[viewport]
+    frame = frame[viewport]
+    if len(frame) < 32:
+        return 0, 1.0, top, bottom
+
+    votes = _row_offsets(prev, frame)
+    candidates = {0}
+    candidates.update(shift for shift, count in votes.most_common(8) if count >= 4)
+    a, b = prev.astype(np.int16), frame.astype(np.int16)
+    a_ink = np.abs(a - np.median(a, axis=1, keepdims=True)).max(axis=2) >= 16
+    b_ink = np.abs(b - np.median(b, axis=1, keepdims=True)).max(axis=2) >= 16
+
+    def verify(shifts):
+        return [(_overlap_score(a, b, a_ink, b_ink, shift), shift) for shift in shifts]
+
+    ranks = verify(candidates)
+    if max(ranks)[0] < .85:
+        candidates.update(_vertical_candidates(prev, frame))
+        ranks = verify(candidates)
+    if max(ranks)[0] < .85:
+        # A changing banner at the bottom can dominate the pixel count. For
+        # offsets already supported by exact rows, also check the overlap above it.
+        limit = len(a) - len(a) // 6
+        scores = {shift: score for score, shift in ranks}
+        for shift, count in votes.most_common(8):
+            if count >= 8:
+                clean_score = _overlap_score(a[:limit], b[:limit], a_ink[:limit], b_ink[:limit], shift)
+                scores[shift] = max(scores.get(shift, 0.), clean_score)
+        ranks = [(score, shift) for shift, score in scores.items()]
+    ranks.sort(reverse=True)
+    score, shift = ranks[0]
+    if score < .85:
+        return None, score, top, bottom
+    if shift <= 0:
+        return 0, score, top, bottom
+    if len(ranks) > 1 and ranks[1][0] >= score - .025:
+        # A recurring grid or row cannot safely decide a seam on its own.
+        return (0 if any(s <= 0 and q >= score - .025 for q, s in ranks) else None), score, top, bottom
+    return shift, score, top, bottom
+
+
+def _refresh_floating_controls(result, previous, frame, shift, top, previous_end):
+    """Refresh a confirmed stationary edge control from the latest aligned view."""
+    height, width = frame.shape[:2]
+    edge = min(256, width // 6)
+    if edge < 12:
+        return
+    origin = len(result) - height
+    for x in (slice(0, edge), slice(width - edge, width)):
+        old = previous[:, x].astype(np.int16)
+        new = frame[:, x].astype(np.int16)
+        lower = max(height // 2, top)
+        stable = np.abs(old[lower:previous_end] - new[lower:previous_end]).max(axis=2) <= 8
+        displaced = np.zeros_like(stable)
+        # Check both alignments so that the leading and trailing edges of a
+        # button are detected even when the step is smaller than the button.
+        start = max(lower, top + shift)
+        if start < previous_end:
+            displaced[start-lower:] = np.abs(old[start:previous_end] - new[start-shift:previous_end-shift]).max(axis=2) > 12
+        end = previous_end - shift
+        if end > lower:
+            displaced[:end-lower] |= np.abs(new[lower:end] - old[lower+shift:previous_end]).max(axis=2) > 12
+        rows, columns = np.where(stable & displaced)
+        if len(rows) < 24 or np.ptp(rows) < 5 or np.ptp(columns) < 5:
+            continue
+        left = x.start + max(0, int(columns.min()) - 2)
+        right = x.start + min(edge, int(columns.max()) + 3)
+        start = max(lower, lower + int(rows.min()) - 2)
+        end = min(previous_end, lower + int(rows.max()) + 3)
+        for start_y, end_y in ((max(top, start - shift), end - shift), (start, end)):
+            if end_y > start_y:
+                result[origin + start_y:origin + end_y, left:right] = frame[start_y:end_y, left:right]
+
+
+def _append_vertical(long_arr, previous, frame, footer_h):
+    """Append only the displacement measured from the last accepted viewport."""
+    if frame.shape != previous.shape or frame.shape[1:] != long_arr.shape[1:] or len(frame) < 60:
+        return -1, 0.0, long_arr, footer_h
+    shift, score, top, bottom = _vertical_motion(previous, frame)
+    if not shift:
+        return (-1 if shift is None else 0), score, long_arr, footer_h
+    # A newly identified fixed bottom belongs to the latest viewport. Preserve
+    # the actual scroll distance even when its detected height varies slightly.
+    height = len(frame)
+    previous_end = height - max(footer_h, bottom)
+    cut = previous_end - shift
+    if cut < top or previous_end < 1:
+        return -1, score, long_arr, footer_h
+    remove = height - previous_end
+    body = long_arr[:-remove] if remove else long_arr
+    # In particular, independently scrolled columns may have been composed
+    # with padding. Do not append from a viewport no longer anchored to the tail.
+    anchor = min(24, previous_end - top)
+    width = frame.shape[1]
+    middle = slice(width // 6, width - width // 6)
+    if anchor < 1 or len(body) < anchor or not np.array_equal(
+            body[-anchor:, middle], previous[previous_end-anchor:previous_end, middle]):
+        return -1, score, long_arr, footer_h
+    result = np.vstack((body, frame[cut:]))
+    _refresh_floating_controls(result, previous, frame, shift, top, previous_end)
+    return shift, score, result, bottom
 
 
 _HALO_GREEN = "#22c55e"            # 同 capture.RegionFrame 选区绿
@@ -593,7 +751,7 @@ class LongShotBar(QWidget):
             frame = grab_array(self.screen(), self.region)
         except Exception:
             frame = None
-        if frame is None:
+        if frame is None or not frame.size:
             self._miss += 1                        # 抓帧瞬时失败按失联计，不中断
             if self._horizontal:
                 self.msg.setText("暂时无法捕获页面，请继续慢滑或手动完成")
@@ -606,20 +764,9 @@ class LongShotBar(QWidget):
         if self._dual:
             self._grab_dual(frame)                 # R119 双栏态走分栏拼接
             return
-        try:
-            body = self.long_arr[:-self._footer_h] if self._footer_h else self.long_arr
-            s, e, score, bh = stitch_pair(body, frame, prev=self._prev,
-                                          strip_footer=not self._appended)
-        except Exception:
-            s, e, score, bh = -1, -1, 0.0, 0
-        if s > 0 and bh > 0 and not self._appended:
-            body = body[:-bh]
-        if s > 0 and tail_dup(body, frame, s, e):
-            s = 0                                  # 假新内容（到底后匹配抖动）：按无新内容处理，
-                                                   # 否则每拍重复追加、长图无限变长
-        if s > 0:
-            # 旧底部只从匹配内容中移除，最新帧的完整下沿在输出末尾保留一次。
-            self.long_arr = np.vstack([body, frame[s:]])
+        added, score, result, bh = _append_vertical(self.long_arr, self._prev, frame, self._footer_h)
+        if added > 0:
+            self.long_arr = result
             self._footer_h = bh
             self._foot_stripped = bh > 0
             self._appended = True
@@ -628,13 +775,12 @@ class LongShotBar(QWidget):
             self._prev = frame.copy()
             self._preview.set_arr(self.long_arr)  # 新内容落进右侧预览
             self.msg.setText(f"拼接中 · 重叠匹配 {score:.2f}")
-        elif s == 0:
+        elif added == 0:
             self._miss = 0
             self.msg.setText("等待滚动…")
         else:
             self._miss += 1
-            self._prev = frame.copy()
-            self.msg.setText("重叠匹配暂失败，继续尝试…（底部动图/轮播不影响拼接）")
+            self.msg.setText("暂未接上，请稍向上退回上一段，再向下慢滚")
         self.update_stat()
         if self._appended:
             self._lock_direction()
@@ -809,7 +955,7 @@ class LongShotBar(QWidget):
         else:
             self._miss += 1
             self.msg.setText("重叠匹配暂失败，继续尝试…（底部动图/轮播不影响拼接）")
-        self._prev_full = frame.copy()               # 切回单栏时恢复 prev 用
+        self._prev_full = np.hstack((self._colL.prev, self._colR.prev))  # 仅记录两栏各自已接入的画面
         self.frames = self._colL.frames + self._colR.frames - 1
         self.update_stat()
         if self._divider is not None:
@@ -1059,28 +1205,15 @@ class _ColumnState:
 
     def feed(self, frame):
         """喂一帧 → (追加行数, score)；0=无新内容；-1=重叠识别失败。"""
-        try:
-            body = self.long[:-self.footer_h] if self.footer_h else self.long
-            s, e, score, bh = stitch_pair(body, frame, prev=self.prev,
-                                          strip_footer=not self.appended)
-        except Exception:
-            s, e, score, bh = -1, -1, 0.0, 0
-        if s > 0 and bh > 0 and not self.appended:
-            body = body[:-bh]
-        if s > 0 and tail_dup(body, frame, s, e):
-            s = 0                              # 假新内容（到底后匹配抖动）：按无新内容处理
-        if s > 0:
-            self.long = np.vstack([body, frame[s:]])
+        added, score, result, bh = _append_vertical(self.long, self.prev, frame, self.footer_h)
+        if added > 0:
+            self.long = result
             self.footer_h = bh
             self.foot_stripped = bh > 0
             self.appended = True
             self.frames += 1
             self.prev = frame.copy()
-            return e - s, score
-        if s == 0:
-            return 0, score
-        self.prev = frame.copy()
-        return -1, score
+        return added, score
 
 
 class _HorizontalState:
