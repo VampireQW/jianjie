@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QColorDialog, QMenu
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLabel, QLineEdit, QMenu, QPushButton
 
 import beautify
 import capture
@@ -90,18 +90,45 @@ class AnnotationTextBackgroundTests(unittest.TestCase):
         self.assertIs(overlay.text_editor, editor)
         self.assertEqual(editor.toPlainText(), '备注\nSecond line')
         self.assertEqual(overlay.stamps, [])
+        overlay.activateWindow()
+        self.app.processEvents()
+        QTest.mouseClick(props._swatches['#111111'], Qt.LeftButton)
+        self.assertIs(overlay.text_editor, editor)
+        self.assertTrue(editor.hasFocus())
+        self.assertEqual(editor._color, '#111111')
+        self.assertEqual(editor.background_color, '#f59e0b')
         self.app.processEvents()
         point = editor.pos() + QPoint(-2, 5)
         self.assertEqual(overlay.grab().toImage().pixelColor(point).name(), '#f59e0b')
 
-        def accept_custom_color():
-            dialog = self.app.activeModalWidget()
-            if isinstance(dialog, QColorDialog):
-                dialog.setCurrentColor(QColor('#b9f7ec'))
-                dialog.accept()
+        seen = []
 
-        QTimer.singleShot(100, accept_custom_color)
+        def select_custom_color(confirm):
+            dialog = self.app.activeModalWidget()
+            if isinstance(dialog, capture.TextBackgroundColorDialog):
+                seen.append({widget.text() for widget in dialog.findChildren(QLabel)
+                             + dialog.findChildren(QPushButton) if widget.isVisible()})
+                field = dialog.findChild(QLineEdit, 'qt_colorname_lineedit')
+                field.setFocus()
+                field.selectAll()
+                QTest.keyClicks(field, '#b9f7ec')
+                actions = dialog.findChild(QDialogButtonBox)
+                button = QDialogButtonBox.Ok if confirm else QDialogButtonBox.Cancel
+                QTest.mouseClick(actions.button(button), Qt.LeftButton)
+            elif dialog is not None:
+                dialog.close()
+
+        QTimer.singleShot(100, lambda: select_custom_color(False))
         pick('自定义颜色…')
+        self.assertIs(overlay.text_editor, editor)
+        self.assertEqual((editor.background_color, editor._color), ('#f59e0b', '#111111'))
+
+        QTimer.singleShot(100, lambda: select_custom_color(True))
+        pick('自定义颜色…')
+        expected_labels = {'常用颜色', '自定义色板', '屏幕取色', '存入色板', '色相', '饱和度',
+                           '明度', '红', '绿', '蓝', '色值', '应用底色', '取消'}
+        self.assertEqual(len(seen), 2)
+        self.assertEqual({text for text in seen[-1] if text.strip()}, expected_labels)
         self.assertIs(overlay.text_editor, editor)
         self.assertEqual(editor.background_color, '#b9f7ec')
         self.assertEqual(editor._color, '#ffffff')
@@ -110,6 +137,31 @@ class AnnotationTextBackgroundTests(unittest.TestCase):
         self.assertTrue(editor.background_rect.isEmpty())
         overlay.commit_text_editor()
         self.assertNotIn('bg', overlay.stamps[0])
+
+    def test_swatches_override_auto_color_before_typing_and_on_selected_text(self):
+        overlay = self.shot()
+        overlay.show_toolbar()
+        overlay.activateWindow()
+        self.app.processEvents()
+        props = overlay.props_pop
+
+        overlay.set_text_background('#ffffff')
+        self.assertTrue(props._swatches['#111111'].isChecked())
+        QTest.mouseClick(props._swatches['#3b82f6'], Qt.LeftButton)
+        self.assertTrue(props._swatches['#3b82f6'].isChecked())
+        overlay.set_text_background('#ffffff')
+        overlay.show_text_editor(QPoint(55, 42), 'Text')
+        self.assertEqual(overlay.text_editor._color, '#3b82f6')
+        overlay.commit_text_editor()
+        overlay.sel_stamp = ('shape', 0)
+        QTest.mouseClick(props._swatches['#ef4444'], Qt.LeftButton)
+        self.assertEqual((overlay.stamps[0]['bg'], overlay.stamps[0]['color']), ('#ffffff', '#ef4444'))
+        document = history.from_overlay(overlay)
+        self.assertEqual(history.decode(history.encode(document['stamps']))[0]['color'], '#ef4444')
+        overlay.undo()
+        self.assertEqual(overlay.stamps[0]['color'], '#3b82f6')
+        overlay._reedit_text(0)
+        self.assertEqual(overlay.text_editor._color, '#3b82f6')
 
     def test_history_reopen_and_beautify_keep_background_on_the_same_text(self):
         overlay = self.shot()
@@ -165,7 +217,13 @@ class AnnotationTextBackgroundTests(unittest.TestCase):
         canvas.set_text_background('#ffffff')
         canvas.show_text_editor(QPoint(55, 42), '白底文字')
         self.assertEqual(canvas.text_editor._color, '#111111')
-        canvas.set_color('#ef4444')
+        window.show()
+        window.activateWindow()
+        self.app.processEvents()
+        canvas.text_editor.setFocus()
+        editor = canvas.text_editor
+        QTest.mouseClick(window.props_pop._swatches['#ef4444'], Qt.LeftButton)
+        self.assertIs(canvas.text_editor, editor)
         self.assertEqual(canvas.text_editor._color, '#ef4444')
         canvas.set_text_background('#22c55e')
         self.assertEqual(canvas.text_editor._color, '#ffffff')

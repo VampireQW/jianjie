@@ -97,6 +97,11 @@ def build():
         if file.name == 'raop_ntp.c':
             ntp_patched = file.read_text().replace('struct cmsghdr align;', 'WSACMSGHDR align;', 1)
             ntp_patched = ntp_patched.replace('#include "compat.h"', '#include "compat.h"\n#ifdef _WIN32\ntypedef WSACMSGHDR CMSGHDR;\ntypedef WSACMSGHDR *PCMSGHDR;\n#endif')
+            # recvfrom reads and writes the address length itself. Passing &addrlen
+            # instead makes Winsock interpret the pointer bytes as the buffer size.
+            wrong_length = '(socklen_t *) &addrlen'
+            assert ntp_patched.count(wrong_length) == 2
+            ntp_patched = ntp_patched.replace(wrong_length, '(socklen_t *) addrlen')
             replacement = generated/'raop_ntp.c'
             replacement.write_text(ntp_patched)
             file = replacement

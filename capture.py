@@ -9,7 +9,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSiz
 from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QIcon, QImage,
                            QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QRegion,
                            QTextCursor, QTextLayout, QTextOption)
-from PySide6.QtWidgets import (QApplication, QColorDialog, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+from PySide6.QtWidgets import (QApplication, QColorDialog, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
                                QSizePolicy, QSpacerItem, QTextEdit, QWidget, QVBoxLayout)
 
 import common as C
@@ -153,6 +153,57 @@ class _SizeDot(QPushButton):
         p.end()
 
 
+class TextBackgroundColorDialog(QColorDialog):
+    """文字底色选择器，保留取色、色板及精确输入。"""
+
+    _LABELS = {
+        "Basic colors": "常用颜色", "Custom colors": "自定义色板",
+        "Pick Screen Color": "屏幕取色", "Add to Custom Colors": "存入色板",
+        "Hue:": "色相", "Sat:": "饱和度", "Val:": "明度",
+        "Red:": "红", "Green:": "绿", "Blue:": "蓝", "HTML:": "色值",
+        "Alpha channel:": "不透明度",
+    }
+
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        self.setOption(QColorDialog.DontUseNativeDialog)
+        self.setCurrentColor(color)
+        self.setWindowTitle("自定义文字底色")
+        for widget in self.findChildren(QLabel) + self.findChildren(QPushButton):
+            translation = self._LABELS.get(widget.text().replace("&", ""))
+            if translation:
+                widget.setText(translation)
+
+        actions = self.findChild(QDialogButtonBox)
+        apply_button = actions.button(QDialogButtonBox.Ok)
+        apply_button.setText("应用底色")
+        apply_button.setObjectName("applyBackground")
+        actions.button(QDialogButtonBox.Cancel).setText("取消")
+        name_input = self.findChild(QLineEdit, "qt_colorname_lineedit")
+        if name_input is not None:
+            name_input.setAccessibleName("十六进制色值")
+
+        layout = self.layout()
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(10)
+        self.setStyleSheet(f"""
+            QColorDialog {{ background:{C.UI_BG_CARD}; }}
+            QLabel {{ color:{C.UI_TEXT2}; font-size:12px; }}
+            QLineEdit, QSpinBox {{ background:{C.UI_POPUP_BG}; color:{C.UI_TEXT};
+                border:1px solid #303949; border-radius:6px; padding:3px 7px;
+                selection-background-color:#285ea8; }}
+            QSpinBox QLineEdit {{ border:none; padding:0; background:transparent; }}
+            QLineEdit:focus, QSpinBox:focus {{ border-color:{C.UI_ACCENT}; }}
+            QPushButton {{ background:#232b3a; color:{C.UI_TEXT};
+                border:1px solid transparent; border-radius:7px; min-height:29px;
+                padding:0 12px; font-size:12px; }}
+            QPushButton:hover {{ background:#303d53; }}
+            QPushButton:focus {{ border-color:#8cbcf8; }}
+            QPushButton#applyBackground {{ background:{C.UI_BADGE_TO}; color:white; font-weight:600; }}
+            QPushButton#applyBackground:hover {{ background:#1d4ed8; }}
+        """)
+
+
 class ToolPropsPop(QWidget):
     """R134 辐条重做：粗细/颜色 + 工具级选项（箭头样式/序号样式起始/聚光形态）统一收进
     贴工具钮下方的浮条——主工具条不再塞工具级选项（R100/R101 贴身钮范式退役）。
@@ -205,7 +256,9 @@ class ToolPropsPop(QWidget):
         self._swatches = {}
         color_names = dict(zip(COLORS, COLOR_NAMES))
         for c in COLORS:
-            b = _SwatchBtn(c, color_names[c], lambda _, cc=c: self.ov.set_color(cc))
+            b = _SwatchBtn(c, color_names[c], lambda _, cc=c: self._pick_color(cc))
+            b.setProperty("keepsAnnotationEditor", True)
+            b.setAccessibleName(color_names[c])
             b.setChecked(c == self.ov.cur_color)
             lay.addWidget(b)
             self._swatches[c] = b
@@ -306,6 +359,12 @@ class ToolPropsPop(QWidget):
         painter.end()
         return QIcon(pixmap)
 
+    def _pick_color(self, color):
+        self.ov.set_color(color)
+        canvas = getattr(self.ov, "canvas", self.ov)
+        if canvas.text_editor is not None:
+            canvas.text_editor.setFocus(Qt.OtherFocusReason)
+
     def _pick_text_background(self):
         canvas = getattr(self.ov, "canvas", self.ov)
         initial = canvas.text_background()
@@ -325,10 +384,12 @@ class ToolPropsPop(QWidget):
             button = self._btn_text_background
             chosen = menu.exec(button.mapToGlobal(QPoint(0, button.height() + 4)))
             if chosen == custom:
-                color = QColorDialog.getColor(QColor(initial or COLORS[1]), self, "选择文字底色",
-                                              QColorDialog.DontUseNativeDialog)
-                if color.isValid():
-                    canvas.set_text_background(color.name())
+                dialog = TextBackgroundColorDialog(QColor(initial or COLORS[1]), self)
+                try:
+                    if dialog.exec() == QDialog.Accepted:
+                        canvas.set_text_background(dialog.selectedColor().name())
+                finally:
+                    dialog.deleteLater()
             elif chosen in choices:
                 canvas.set_text_background(choices[chosen])
         finally:
@@ -672,6 +733,7 @@ class ShotOverlay(QWidget):
         self.cur_tool = "rect"
         self.cur_color = "#ef4444"
         self.cur_text_background = None
+        self._text_color_override = None
         self._choosing_text_background = False
         self.cur_size = 2                  # 默认「细」：必须取工具条粗细枚举 (2,4,7) 之一，否则无选中项
         # R100 标注属性（会话级默认值；与 cur_color/cur_size 同纪律不持久化）：
@@ -2351,7 +2413,7 @@ class ShotOverlay(QWidget):
         fs = 12 + self.cur_size if fs is None else fs
         color = self.cur_color if color is None else color
         if idx is None:
-            color = _text_foreground_for_background(self.cur_text_background, color)
+            color = self._new_text_color(color)
         sel = self.sel or QRect(0, 0, self.width(), self.height())
         pos = QPoint(max(sel.left(), min(pos.x(), sel.right() - 47)),
                      max(sel.top(), min(pos.y(), sel.bottom() - 20)))
@@ -2857,9 +2919,14 @@ class ShotOverlay(QWidget):
         stamp = self._selected_text()
         if stamp is not None:
             return stamp["color"]
-        return _text_foreground_for_background(self.cur_text_background, self.cur_color)
+        return self._new_text_color(self.cur_color)
+
+    def _new_text_color(self, fallback):
+        return self._text_color_override or _text_foreground_for_background(self.cur_text_background, fallback)
 
     def set_text_background(self, color):
+        if color == self.text_background():
+            return
         editor = self.text_editor
         stamp = self._selected_text()
         if editor is not None:
@@ -2867,29 +2934,33 @@ class ShotOverlay(QWidget):
             editor.set_annotation_color(_text_foreground_for_background(color, editor._color))
             if editor._idx is None:
                 self.cur_text_background = color
+                self._text_color_override = None
             editor.refresh_background()
         elif stamp is not None:
-            foreground = _text_foreground_for_background(color, stamp["color"])
-            if color != stamp.get("bg") or foreground != stamp["color"]:
-                self.push_undo()
-                stamp["color"] = foreground
-                if color:
-                    stamp["bg"] = color
-                else:
-                    stamp.pop("bg", None)
-                self._rerender_anno()
-                self.update()
+            self.push_undo()
+            stamp["color"] = _text_foreground_for_background(color, stamp["color"])
+            if color:
+                stamp["bg"] = color
+            else:
+                stamp.pop("bg", None)
+            self._rerender_anno()
+            self.update()
         else:
             self.cur_text_background = color
+            self._text_color_override = None
         self._refresh_prop_btns()
 
     def set_color(self, c):
         self.cur_color = c
         if self.text_editor:               # 编辑中的文字即时换色（所见即所得）
             self.text_editor.set_annotation_color(c)
+            if self.text_editor._idx is None:
+                self._text_color_override = c
         elif self.cur_tool == "text":
             stamp = self._selected_text()
-            if stamp is not None and stamp["color"] != c:
+            if stamp is None:
+                self._text_color_override = c
+            elif stamp["color"] != c:
                 self.push_undo()
                 stamp["color"] = c
                 self._rerender_anno()

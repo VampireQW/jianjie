@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 APP_NAME = "简截"
 APP_VERSION = "4.13.7-win.1"
-APP_BUILD_ID = "R314"
+APP_BUILD_ID = "R316"
 
 
 def utility_window_flags(on_top=False):

@@ -21,7 +21,7 @@
 
 [下载 Windows 完整版](https://github.com/VampireQW/jianjie/releases/latest) · [访问官网](https://jianjie-4b7.pages.dev/)
 
-当前版本 **R314 · 2026-11-17**。截图文字新增圆角底色，默认无底色，支持与文字一致的六种预设色和自定义颜色。选择底色后，白底自动配黑字，其他底色配白字，仍可手动调整文字颜色。输入、导出及历史再编辑同步保留效果。详见 [本次更新](docs/releases/R314.md)、[横向长截图](docs/releases/R307.md) 与 [MCP 使用说明](LOCAL_MCP.md)。
+当前版本 **R316 · 2026-11-23**。修复 iPhone 投屏有画面但电脑无声的问题。截图文字选了底色后可以继续调整字色，自定义底色窗口改为简截的深色样式，按钮和字段使用中文。详见 [本次更新](docs/releases/R316.md)、[横向长截图](docs/releases/R307.md) 与 [MCP 使用说明](LOCAL_MCP.md)。
 
 ![简截主面板：截图、长截图、录屏、搜索和互传等功能入口](docs/screenshots/main-panel.png)
 
@@ -234,7 +234,7 @@ python -m PyInstaller --noconfirm --clean 简截.spec
 
 第三方组件及图标声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-[^memory]: 包体积按 R314 的 40,569,987 字节计算。iPhone 投屏首次另行下载约 114 MB 的媒体组件，后续本地复用。内存参考来自 R253 的一次历史运行快照，主程序与启动器工作集合计约 85.7 MiB，当次私有内存合计约 109.3 MiB。统计范围为这两个进程的工作集和私有内存。实际占用会随系统、图片大小、长截图长度和录制场景变化。
+[^memory]: 包体积按 R316 的 40,571,468 字节计算。iPhone 投屏首次另行下载约 114 MB 的媒体组件，后续本地复用。内存参考来自 R253 的一次历史运行快照，主程序与启动器工作集合计约 85.7 MiB，当次私有内存合计约 109.3 MiB。统计范围为这两个进程的工作集和私有内存。实际占用会随系统、图片大小、长截图长度和录制场景变化。
 
 ## 今日待办轻提醒与 MCP
 

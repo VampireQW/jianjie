@@ -78,6 +78,7 @@ class LongCanvas(QWidget):
         self.cur_tool = "rect"
         self.cur_color = capture.COLORS[0]
         self.cur_text_background = None
+        self._text_color_override = None
         self._choosing_text_background = False
         self.cur_size = 2
         # R100 标注属性（与截图侧同名同语义；_paint_nums/_paint_shape 委托 capture 版时按 self 解析）
@@ -160,6 +161,7 @@ class LongCanvas(QWidget):
     _text_editor_focus_out = capture.ShotOverlay._text_editor_focus_out
     text_background = capture.ShotOverlay.text_background
     text_color = capture.ShotOverlay.text_color
+    _new_text_color = capture.ShotOverlay._new_text_color
     set_text_background = capture.ShotOverlay.set_text_background
     set_color = capture.ShotOverlay.set_color
     _delete_selected = capture.ShotOverlay._delete_selected
@@ -795,7 +797,7 @@ class LongCanvas(QWidget):
         fs_img = max(12, round((12 + self.cur_size) * self._s)) if fs is None else fs
         color = self.cur_color if color is None else color
         if idx is None:
-            color = capture._text_foreground_for_background(self.cur_text_background, color)
+            color = self._new_text_color(color)
         point = self._to_view(img_pos)
         dx = max(0, min(point.x(), self.width() - 60))
         dy = max(0, min(point.y(), self.height() - 30))
